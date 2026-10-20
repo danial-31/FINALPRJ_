@@ -1,0 +1,42 @@
+cmake_minimum_required(VERSION 3.20)
+project(FINALPRJ VERSION 0.1.0 LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+# All dependency sources are included: configuration needs no network access.
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+set(GLFW_LIBRARY_TYPE STATIC CACHE STRING "" FORCE)
+add_subdirectory(third_party/glfw EXCLUDE_FROM_ALL)
+
+set(GLM_BUILD_LIBRARY OFF CACHE BOOL "" FORCE)
+set(GLM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLM_BUILD_INSTALL OFF CACHE BOOL "" FORCE)
+add_subdirectory(third_party/glm EXCLUDE_FROM_ALL)
+
+add_library(glad STATIC third_party/glad/src/gl.c)
+target_include_directories(glad SYSTEM PUBLIC third_party/glad/include)
+
+add_library(stb_image STATIC src/stb_image.cpp)
+target_include_directories(stb_image SYSTEM PUBLIC third_party/stb)
+
+add_executable(finalprj src/main.cpp)
+target_compile_definitions(finalprj PRIVATE GLFW_INCLUDE_NONE)
+target_link_libraries(finalprj PRIVATE glfw glad glm::glm stb_image)
+set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT finalprj)
+
+if(MSVC)
+    target_compile_options(finalprj PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(finalprj PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    add_test(NAME black_window COMMAND finalprj --smoke-test)
+    set_tests_properties(black_window PROPERTIES TIMEOUT 20)
+endif()
