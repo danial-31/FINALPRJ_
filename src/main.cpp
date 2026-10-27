@@ -23,6 +23,8 @@ static float previewTime=4.25f;
 static bool previewMotion=false,followHero=false;
 static bool showOccupancy=false;
 static bool interfaceVisible=true;
+static bool sceneOnly=false,startBattle=false;
+static int startClass=-1;
 static constexpr const char* vertexShader=R"GLSL(
 #version 330 core
 layout(location=0) in vec3 position;
@@ -245,7 +247,7 @@ struct PointShadows {
         glBindFramebuffer(GL_FRAMEBUFFER,0);
     }
     ~PointShadows(){glDeleteFramebuffers(1,&fbo);glDeleteFramebuffers(1,&cacheFbo);glDeleteTextures(4,textures);}
-    void draw(GLuint shader,const GpuMesh& scene,const GpuMesh& hero,const glm::mat4& heroModel,const std::vector<Torch>& torches,float time){
+    void draw(GLuint shader,const GpuMesh& scene,const GpuMesh& hero,const glm::mat4& heroModel,const std::vector<Torch>& torches,float time,const GpuMesh* enemies=nullptr){
         const glm::vec3 directions[]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
         const glm::vec3 up[]={{0,-1,0},{0,-1,0},{0,0,1},{0,0,-1},{0,-1,0},{0,-1,0}};
         const glm::mat4 projection=glm::perspective(pi*.5f,1.f,.12f,farPlane);
@@ -269,6 +271,7 @@ struct PointShadows {
                 glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_CUBE_MAP_POSITIVE_X+face,textures[light],0);
                 glBlitFramebuffer(0,0,size,size,0,0,size,size,GL_DEPTH_BUFFER_BIT,GL_NEAREST);
                 matrix(shader,"model",heroModel);hero.draw();
+                if(enemies){matrix(shader,"model",glm::mat4(1));enemies->draw();}
             }
         }
         cached=true;
@@ -325,7 +328,7 @@ std::vector<Particle> particles(float time,const std::vector<Torch>& torches,glm
     }
     return result;
 }
-bool capture(const fs::path& path,int w,int h){
+bool capture(const fs::path& path,int w,int h,bool verifyScene=true){
     std::vector<unsigned char> pixels(size_t(w)*size_t(h)*3);
     glPixelStorei(GL_PACK_ALIGNMENT,1);glReadPixels(0,0,w,h,GL_RGB,GL_UNSIGNED_BYTE,pixels.data());
     if(path.has_parent_path())fs::create_directories(path.parent_path());
@@ -335,13 +338,19 @@ bool capture(const fs::path& path,int w,int h){
     for(size_t i=0;i<pixels.size();i+=3){double v=(double(pixels[i])+pixels[i+1]+pixels[i+2])/3;mean+=v;squares+=v*v;if(v>30)++lit;}
     double count=double(w)*h;mean/=count;squares=squares/count-mean*mean;
     std::cout<<"Frame verification: mean="<<mean<<" variance="<<squares<<" lit="<<double(lit)/count<<"\nCapture: "<<path<<'\n';
-    return out.good()&&mean>8&&squares>120&&double(lit)/count>.08;
+    return out.good()&&(!verifyScene||(mean>8&&squares>120&&double(lit)/count>.08));
 }
+#include "combat_view.hpp"
 int run(GLFWwindow* window,bool smoke,const fs::path& capturePath,const fs::path& executableDir){
     Mesh sceneMesh,heroMesh;std::vector<Torch> torches;
     buildArchitecture(sceneMesh);buildProps(sceneMesh,torches);buildHero(heroMesh);
     std::cout<<"Scene: "<<sceneMesh.vertices.size()/3<<" triangles, hero "<<heroMesh.vertices.size()/3<<", torches "<<torches.size()<<'\n';
     GpuMesh scene(sceneMesh),hero(heroMesh);
+    CombatView battle(executableDir/"assets");
+    if(!sceneOnly&&(startClass>=0||smoke||startBattle)){
+        battle.choose(combat::Class(startClass>=0?startClass:0));
+        if(startBattle||smoke)battle.game.engage();
+    }
     Mesh cellMesh;
     for(int row=0;row<layout::rows;++row)for(int col=0;col<layout::columns;++col){
         if(!layout::isBlocked(col,row))continue;
@@ -394,19 +403,21 @@ int run(GLFWwindow* window,bool smoke,const fs::path& capturePath,const fs::path
         auto pressed=[&](int key){return glfwGetKey(window,key)==GLFW_PRESS;};
         bool tab=pressed(GLFW_KEY_TAB),reset=pressed(GLFW_KEY_R),shot=pressed(GLFW_KEY_F12),space=pressed(GLFW_KEY_SPACE);
         if(tab&&!lastTab)interfaceVisible=!interfaceVisible;
-        bool grid=pressed(GLFW_KEY_G);if(grid&&!lastGrid)showOccupancy=!showOccupancy;lastGrid=grid;
-        if(reset&&!lastReset){followHero=false;yaw=.57f;pitch=.74f;zoom=17.5f;focus={0,1.8f,0};heroPosition=layout::center({10,11,1,1});heroYaw=0;velocity=glm::vec3(0);gait=0;}
+        bool grid=pressed(GLFW_KEY_G);if(sceneOnly&&grid&&!lastGrid)showOccupancy=!showOccupancy;lastGrid=grid;
+        if(sceneOnly&&reset&&!lastReset){followHero=false;yaw=.57f;pitch=.74f;zoom=17.5f;focus={0,1.8f,0};heroPosition=layout::center({10,11,1,1});heroYaw=0;velocity=glm::vec3(0);gait=0;}
         if(pressed(GLFW_KEY_1)){followHero=false;yaw=.57f;pitch=.74f;zoom=17.5f;focus={0,1.8f,0};}
         if(pressed(GLFW_KEY_2)){followHero=false;yaw=.30f;pitch=.60f;zoom=6.5f;focus={0,2.5f,-8.0f};}
         if(pressed(GLFW_KEY_3)){followHero=true;yaw=-2.45f;pitch=.48f;zoom=3.8f;}
         if(followHero)focus=heroPosition+glm::vec3(0,1.25f,0);
-        if((space&&!lastSpace)||(smoke&&frame==8))pulse=1;
+        if(sceneOnly&&((space&&!lastSpace)||(smoke&&frame==8)))pulse=1;
         lastTab=tab;lastReset=reset;lastSpace=space;pulse=std::max(0.f,pulse-dt*.9f);
         double mx,my;glfwGetCursorPos(window,&mx,&my);
         bool mouse=glfwGetMouseButton(window,GLFW_MOUSE_BUTTON_RIGHT)==GLFW_PRESS;
         if(mouse&&dragging){yaw-=float(mx-oldX)*.006f;pitch=std::clamp(pitch+float(my-oldY)*.004f,.35f,1.25f);}
         dragging=mouse;oldX=mx;oldY=my;
         if(pressed(GLFW_KEY_LEFT))yaw-=dt*.8f;if(pressed(GLFW_KEY_RIGHT))yaw+=dt*.8f;
+        glm::vec3 oldPosition=heroPosition;
+        if(sceneOnly){
         glm::vec3 right(std::cos(yaw),0,-std::sin(yaw)),forward(-std::sin(yaw),0,-std::cos(yaw)),movement(0);
         if(pressed(GLFW_KEY_W))movement+=forward;if(pressed(GLFW_KEY_S))movement-=forward;
         if(pressed(GLFW_KEY_D))movement+=right;if(pressed(GLFW_KEY_A))movement-=right;
@@ -415,9 +426,22 @@ int run(GLFWwindow* window,bool smoke,const fs::path& capturePath,const fs::path
         float requestedSpeed=pressed(GLFW_KEY_LEFT_SHIFT)?2.6f:1.6f;
         glm::vec3 desired=glm::length(movement)>.01f?glm::normalize(movement)*requestedSpeed:glm::vec3(0);
         velocity=glm::mix(velocity,desired,1.f-std::exp(-12.f*dt));
-        glm::vec3 oldPosition=heroPosition,next=heroPosition+velocity*dt;
+        glm::vec3 next=heroPosition+velocity*dt;
         if(canMove({next.x,0,heroPosition.z}))heroPosition.x=next.x;else velocity.x=0;
         if(canMove({heroPosition.x,0,next.z}))heroPosition.z=next.z;else velocity.z=0;
+        }
+        float ease=1.f-std::exp(-9.f*dt);
+        cameraYaw+=std::atan2(std::sin(yaw-cameraYaw),std::cos(yaw-cameraYaw))*ease;
+        cameraPitch=glm::mix(cameraPitch,pitch,ease);cameraZoom=glm::mix(cameraZoom,zoom,ease);cameraFocus=glm::mix(cameraFocus,focus,ease);
+        glm::vec3 target=cameraFocus,camera=target+glm::vec3(std::sin(cameraYaw)*std::cos(cameraPitch),std::sin(cameraPitch),std::cos(cameraYaw)*std::cos(cameraPitch))*45.f;
+        float aspect=float(w)/float(h);glm::mat4 vp=glm::ortho(-cameraZoom*aspect,cameraZoom*aspect,-cameraZoom,cameraZoom,.1f,100.f)*glm::lookAt(camera,target,glm::vec3(0,1,0));
+        if(!sceneOnly){
+            battle.input(window,vp,w,h,dt,smoke||!capturePath.empty());
+            if(!battle.positions.empty())heroPosition=battle.positions[0];
+            velocity=dt>0?(heroPosition-oldPosition)/dt:glm::vec3(0);
+            if(battle.hitTimer>.3f)pulse=battle.hitTimer;
+            battle.geometry(time);
+        }
         float distance=glm::length(heroPosition-oldPosition);
         float actualSpeed=dt>0?distance/dt:0;
         moveBlend=glm::mix(moveBlend,std::clamp(actualSpeed/1.6f,0.f,1.f),1.f-std::exp(-10.f*dt));
@@ -431,16 +455,11 @@ int run(GLFWwindow* window,bool smoke,const fs::path& capturePath,const fs::path
         heroMesh.vertices.clear();buildAnimatedHero(heroMesh,time,gait,moveBlend,castBlend);hero.update(heroMesh);
         glm::mat4 heroModel=glm::rotate(glm::translate(glm::mat4(1),heroPosition),heroYaw,glm::vec3(0,1,0));
         heroModel=glm::scale(heroModel,glm::vec3(1.45f));
-        float ease=1.f-std::exp(-9.f*dt);
-        cameraYaw+=std::atan2(std::sin(yaw-cameraYaw),std::cos(yaw-cameraYaw))*ease;
-        cameraPitch=glm::mix(cameraPitch,pitch,ease);cameraZoom=glm::mix(cameraZoom,zoom,ease);cameraFocus=glm::mix(cameraFocus,focus,ease);
-        glm::vec3 target=cameraFocus,camera=target+glm::vec3(std::sin(cameraYaw)*std::cos(cameraPitch),std::sin(cameraPitch),std::cos(cameraYaw)*std::cos(cameraPitch))*45.f;
-        float aspect=float(w)/float(h);glm::mat4 vp=glm::ortho(-cameraZoom*aspect,cameraZoom*aspect,-cameraZoom,cameraZoom,.1f,100.f)*glm::lookAt(camera,target,glm::vec3(0,1,0));
         targets.resize(w,h);glDisable(GL_BLEND);glEnable(GL_DEPTH_TEST);glDepthMask(GL_TRUE);glDisable(GL_CULL_FACE);
-        pointShadows.draw(pointShadowShader,scene,hero,heroModel,torches,time);
+        pointShadows.draw(pointShadowShader,scene,hero,heroModel,torches,time,sceneOnly?nullptr:&battle.enemy);
         glBindFramebuffer(GL_FRAMEBUFFER,shadowFbo);glViewport(0,0,2048,2048);glClear(GL_DEPTH_BUFFER_BIT);
         glUseProgram(shadowShader);matrix(shadowShader,"lightMatrix",lightMatrix);scalar(shadowShader,"time",time);glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(2.f,3.f);
-        matrix(shadowShader,"model",glm::mat4(1));scene.draw();matrix(shadowShader,"model",heroModel);hero.draw();glDisable(GL_POLYGON_OFFSET_FILL);
+        matrix(shadowShader,"model",glm::mat4(1));scene.draw();if(!sceneOnly)battle.enemy.draw();matrix(shadowShader,"model",heroModel);hero.draw();glDisable(GL_POLYGON_OFFSET_FILL);
         glBindFramebuffer(GL_FRAMEBUFFER,targets.fbo);glViewport(0,0,w,h);
         glClearColor(.007f,.011f,.018f,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
         glUseProgram(shader);matrix(shader,"viewProjection",vp);matrix(shader,"lightMatrix",lightMatrix);
@@ -465,7 +484,9 @@ int run(GLFWwindow* window,bool smoke,const fs::path& capturePath,const fs::path
             vector(shader,i==0?"pointShadowPositions[0]":"pointShadowPositions[1]",torches[size_t(i)+2].position+glm::vec3(0,.38f,0));
         }
         scalar(shader,"pointShadowFar",PointShadows::farPlane);
-        matrix(shader,"model",glm::mat4(1));scene.draw();if(showOccupancy)cells.draw();matrix(shader,"model",heroModel);hero.draw();
+        matrix(shader,"model",glm::mat4(1));scene.draw();if(showOccupancy)cells.draw();
+        if(!sceneOnly){battle.grid.draw();battle.enemy.draw();}
+        matrix(shader,"model",heroModel);hero.draw();
         auto points=particles(time,torches,heroPosition,pulse);
         glUseProgram(particleProgram);matrix(particleProgram,"viewProjection",vp);scalar(particleProgram,"pointScale",float(h)/(2*cameraZoom));
         glBindVertexArray(particleVao);glBindBuffer(GL_ARRAY_BUFFER,particleVbo);
@@ -482,7 +503,8 @@ int run(GLFWwindow* window,bool smoke,const fs::path& capturePath,const fs::path
         glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,targets.color);integer(post,"scene",0);
         glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,targets.blurTexture[1]);integer(post,"bloom",1);
         glActiveTexture(GL_TEXTURE2);glBindTexture(GL_TEXTURE_2D,targets.depth);integer(post,"depth",2);scalar(post,"time",time);glDrawArrays(GL_TRIANGLES,0,3);
-        if(interfaceVisible){
+        if(!sceneOnly&&interfaceVisible)battle.drawHud(vp);
+        if(sceneOnly&&interfaceVisible){
             glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE_MINUS_SRC_ALPHA);float scale=std::clamp(float(w)/1600.f,.65f,1.5f);
             footer.draw(overlayProgram,36*scale,float(h)-58*scale,scale,w,h);glDisable(GL_BLEND);
         }
@@ -494,11 +516,11 @@ int run(GLFWwindow* window,bool smoke,const fs::path& capturePath,const fs::path
         if(smoke&&frame==3)glfwSetWindowSize(window,1440,900);
         if(smoke&&frame==5){glFinish();benchmarkStart=glfwGetTime();}
         if((smoke&&frame==45)||(!smoke&&!capturePath.empty()&&frame==3)){
-            success=capture(capturePath.empty()?executableDir/"captures/smoke.ppm":capturePath,w,h);glfwSwapBuffers(window);break;
+            success=capture(capturePath.empty()?executableDir/"captures/smoke.ppm":capturePath,w,h,sceneOnly||battle.game.phase!=combat::Phase::ChooseClass);glfwSwapBuffers(window);break;
         }
         glfwSwapBuffers(window);fpsTimer+=elapsed;++fpsFrames;
         if(fpsTimer>=1){
-            std::string titleText="THE OSSUARY | OpenGL 3.3 | "+std::to_string(int(float(fpsFrames)/fpsTimer))+" FPS | WASD move - RMB orbit - wheel zoom";
+            std::string titleText="THE OSSUARY | OpenGL 3.3 | "+std::to_string(int(float(fpsFrames)/fpsTimer))+" FPS | "+(sceneOnly?"WASD move - RMB orbit":"LMB move/attack - E skill - SPACE end turn");
             glfwSetWindowTitle(window,titleText.c_str());fpsTimer=0;fpsFrames=0;
         }
     }
@@ -512,6 +534,13 @@ int main(int argc,char** argv){
     for(int i=1;i<argc;++i){
         std::string arg=argv[i];
         if(arg=="--smoke-test")smoke=true;
+        else if(arg=="--scene-only")sceneOnly=true;
+        else if(arg=="--battle")startBattle=true;
+        else if(arg=="--class"&&i+1<argc){
+            std::string type=argv[++i];
+            if(type=="warrior")startClass=0;else if(type=="rogue")startClass=1;else if(type=="mage")startClass=2;
+            else{std::cerr<<"Unknown class\n";return 1;}
+        }
         else if(arg=="--grid")showOccupancy=true;
         else if(arg=="--no-ui")interfaceVisible=false;
         else if(arg=="--motion")previewMotion=true;
@@ -523,7 +552,7 @@ int main(int argc,char** argv){
             else if(view=="hero"){followHero=true;yaw=-2.45f;pitch=.48f;zoom=3.8f;focus=layout::center({10,11,1,1})+glm::vec3(0,1.25f,0);}
             else if(view!="overview"){std::cerr<<"Unknown view\n";return 1;}
         }
-        else{std::cerr<<"Usage: finalprj [--smoke-test] [--capture output.ppm] [--view overview|altar|hero] [--time seconds] [--motion]\n";return 1;}
+        else{std::cerr<<"Usage: finalprj [--class warrior|rogue|mage] [--battle] [--scene-only] [--smoke-test] [--capture output.ppm] [--view overview|altar|hero] [--time seconds] [--motion]\n";return 1;}
     }
     glfwSetErrorCallback([](int code,const char* message){std::cerr<<"GLFW "<<code<<": "<<message<<'\n';});
     if(!glfwInit())return 1;

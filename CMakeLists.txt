@@ -24,9 +24,12 @@ target_include_directories(glad SYSTEM PUBLIC third_party/glad/include)
 add_library(stb_image STATIC src/stb_image.cpp)
 target_include_directories(stb_image SYSTEM PUBLIC third_party/stb)
 
+add_library(combat STATIC src/combat.cpp)
+target_include_directories(combat PUBLIC src)
+target_link_libraries(combat PUBLIC glm::glm)
 add_executable(finalprj src/main.cpp src/architecture.cpp src/props.cpp)
 target_compile_definitions(finalprj PRIVATE GLFW_INCLUDE_NONE)
-target_link_libraries(finalprj PRIVATE glfw glad glm::glm stb_image)
+target_link_libraries(finalprj PRIVATE glfw glad glm::glm stb_image combat)
 set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT finalprj)
 add_custom_command(TARGET finalprj POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
@@ -40,6 +43,9 @@ endif()
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(combat_test tests/combat_test.cpp)
+    target_link_libraries(combat_test PRIVATE combat)
+    add_test(NAME tactical_combat COMMAND combat_test)
     add_executable(prop_footprint_test tests/prop_footprint_test.cpp)
     target_include_directories(prop_footprint_test PRIVATE src)
     target_link_libraries(prop_footprint_test PRIVATE glm::glm)
