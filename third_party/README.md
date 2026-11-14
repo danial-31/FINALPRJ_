@@ -10,6 +10,7 @@ beside each library. No project-wide license is imposed on the team's own code.
 | `glm/` | https://github.com/g-truc/glm | tag `1.0.3`, commit `8d1fd52e5ab5590e2c81768ace50c72bae28f2ed` | MIT or Modified MIT, `glm/copying.txt` |
 | `glad/` | https://github.com/Dav1dde/glad | generator `2.0.8`, tag commit `73db193f853e2ee079bf3ca8a64aa2eaf6459043` | see `glad/LICENSE` and generated file headers |
 | `stb/` | https://github.com/nothings/stb | commit `a7d4c2175630e1ea5b6f8dd00ab96fed0b97b96d`, stb_image 2.30 | MIT or public domain, `stb/LICENSE` |
+| `miniaudio/` | https://github.com/mackron/miniaudio | tag `0.11.21`, single header `miniaudio.h` | public domain (Unlicense) or MIT-0, `miniaudio/LICENSE` |
 
 GLFW includes its build files, headers, sources and platform dependencies; upstream
 examples, tests and documentation are omitted. GLM includes its headers and build

@@ -12,3 +12,4 @@
 *.ilk
 *.log
 /captures/
+/dist/
