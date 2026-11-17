@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <stdexcept>
+#include <sstream>
 
 using namespace rpg;
 using combat::Kind;
@@ -58,7 +59,11 @@ static bool fight(Campaign& c,int trigger,int& potionsUsed){
             }
         }else{
             int target=-1;float score=1e9f;
-            for(size_t i=1;i<g.actors.size();++i){const auto& e=g.actors[i];if(!e.alive()||!e.aggro)continue;
+            // Pylons are objectives even when the boss joined a nearby fight without waking its group.
+            bool breakShield=false;
+            for(size_t i=1;i<g.actors.size();++i){const auto& e=g.actors[i];
+                if(e.alive()&&e.aggro&&e.kind==Kind::BoneKeeper&&g.shielded(int(i)))breakShield=true;}
+            for(size_t i=1;i<g.actors.size();++i){const auto& e=g.actors[i];if(!e.alive()||(!e.aggro&&!(breakShield&&e.kind==Kind::Pylon)))continue;
                 float sc=glm::length(e.pos-h.pos)+(g.shielded(int(i))?1000.f:0.f)+(e.kind==Kind::Pylon?-50.f:0.f)+(e.vulnerable>0?-30.f:0.f);
                 if(sc<score){score=sc;target=int(i);}}
             if(target>0){
@@ -100,6 +105,15 @@ static void travelTo(Campaign& c,const std::string& exitId){
 }
 static void restAt(Campaign& c){c.hero().hp=c.hero().maxHp;}
 static void spendPoints(Campaign& c){std::string why;for(int t=0;t<3;++t)c.learnTalent(t,why);while(c.hero().skillPoints>0&&c.learnTalent(4,why)){}}
+static void restock(Campaign& c){
+    check(c.zoneId=="village","supplies bought in the village");use(c,"merchant");
+    // Spend earned gold through the real shop, retaining a small reserve for upgrades.
+    const int price=item("potion")->price;std::string why;
+    while(c.count("potion")+c.count("greater_potion")<5&&c.gold>=price+20){
+        int before=c.gold;
+        check(c.buy("merchant","potion",why)&&c.gold==before-price,"restocking pays the merchant price");
+    }
+}
 
 static void playthrough(combat::Class cls){
     Campaign c;c.newGame(cls);int potions=0;std::string why;
@@ -125,6 +139,7 @@ static void playthrough(combat::Class cls){
     check(c.stage("main")==4,"stage 4 after rescue and boss");
     travelTo(c,"boss_exit");
     check(c.travel("shrine_village",why),"fast travel home");
+    restock(c);
     use(c,"elder");check(c.stage("main")==5,"seals explained");
     use(c,"smith");check(c.stage("cargo")==2,"cargo delivered");
     if(c.count("herb")>=3&&c.count("venom")>=2)use(c,"herbalist");
@@ -136,6 +151,7 @@ static void playthrough(combat::Class cls){
     use(c,"flooded_cache");spendPoints(c);restAt(c);
     clearZone(c,potions,true);check(c.flags.count("boss_warden")&&c.stage("main")==6,"warden defeated");
     check(c.travel("shrine_village",why),"travel home 2");
+    restock(c);
     use(c,"smith");check(c.stage("main")==7&&c.count("climbing_gear")==1,"climbing gear");
     for(int k=0;k<2;++k)if(!c.upgradeWeapon(why))break;
     travelTo(c,"to_road");
@@ -151,6 +167,7 @@ static void playthrough(combat::Class cls){
     clearZone(c,potions,true);check(c.flags.count("boss_knight")&&c.stage("main")==9,"knight defeated");
     check(c.seals()==3,"three seals");
     check(c.travel("shrine_village",why),"travel home 3");
+    restock(c);
     travelTo(c,"to_castle");clearZone(c,potions,false);use(c,"shrine_castle");
     travelTo(c,"to_heart");clearZone(c,potions,false);spendPoints(c);restAt(c);
     // equip the best talisman/armor
@@ -158,7 +175,11 @@ static void playthrough(combat::Class cls){
         if(d&&d->rarity==Rarity::Unique&&(d->type==ItemType::Armor||d->type==ItemType::Talisman)&&canEquip(*d,cls)){int slot=d->type==ItemType::Armor?1:2;auto cur=item(c.equip[slot].id);if(!cur||cur->rarity!=Rarity::Unique){c.equipItem(int(i),why);i=0;continue;}}++i;}
     clearZone(c,potions,true);check(c.flags.count("boss_keeper")&&c.stage("main")==10,"bone keeper defeated");
     check(c.travel("shrine_village",why),"travel home 4");
-    use(c,"elder");check(c.stage("main")==11,"story complete");
+    c.requests.clear();use(c,"elder");check(c.stage("main")==10,"final dialogue precedes story completion");
+    check(c.requests.size()==1&&c.requests[0].first==Request::Dialog,"final dialogue is not overwritten by credits");
+    check(!c.dialog.options.empty()&&c.dialog.options.back().action=="finish_campaign","final dialogue has completion action");
+    c.requests.clear();c.dialogAction(c.dialog.options.back().action);
+    check(c.stage("main")==11&&c.requests.size()==1&&c.requests[0].first==Request::Credits&&c.autosavePending,"story completes after final reply");
     std::cout<<combat::className(cls)<<": level "<<c.hero().level<<", potions "<<potions<<", gold "<<c.gold
              <<", weapon +"<<c.equip[0].upgrade<<", stage "<<c.stage("main")<<'\n';
 }
@@ -186,6 +207,55 @@ int main(){
         auto info=Campaign::inspect(dir/"slot.sav");check(info.valid&&info.level==1&&info.zoneName=="Старая дорога","slot info");
         {std::ofstream bad(dir/"bad.sav");bad<<"OSSUARY-SAVE 1\nlevel=2\n";}
         Campaign e;check(!e.load(dir/"bad.sav",why),"truncated save rejected");
+        // Leveled mana survives reload; version-1 files without a mana field recover the level bonus.
+        for(auto cls:{combat::Class::Warrior,combat::Class::Rogue,combat::Class::Mage}){
+            Campaign leveled;leveled.newGame(cls);leveled.game.grantXp(600);leveled.hero().mana=42.375f;
+            check(leveled.save(dir/"leveled.sav",why),"save leveled hero");
+            Campaign restored;check(restored.load(dir/"leveled.sav",why),"load leveled hero");
+            check(restored.hero().level==4&&restored.hero().maxMana==leveled.hero().maxMana&&
+                  std::abs(restored.hero().mana-leveled.hero().mana)<.0001f,"mana round trip for every class");
+        }
+        std::ifstream source(dir/"leveled.sav");std::string original((std::istreambuf_iterator<char>(source)),{});
+        auto alteredSave=[&](const std::string& key,const std::string& value){
+            std::istringstream lines(original);std::string line;std::ofstream out(dir/"altered.sav");
+            while(std::getline(lines,line)){
+                if(line.rfind(key+"=",0)==0){if(!value.empty())out<<key<<'='<<value<<'\n';}
+                else out<<line<<'\n';
+            }
+        };
+        alteredSave("mana","");
+        Campaign legacy;check(legacy.load(dir/"altered.sav",why),"old save without mana remains supported");
+        check(legacy.hero().level==4&&legacy.hero().maxMana==184&&legacy.hero().mana==184,"legacy mana derived from level");
+        // Invalid values must fail before indexing arrays and leave the current session untouched.
+        const std::pair<const char*,const char*> invalid[]={
+            {"equip","-1,apprentice_staff,0"},{"equip","3,apprentice_staff,0"},
+            {"equip","0,padded_armor,0"},{"level","0"},{"level","4junk"},
+            {"maxhp","0"},{"hp","999999"},{"xp","-1"},{"points","-1"},
+            {"gold","-1"},{"mana","nan"},{"mana","1000000"},{"playtime","inf"},
+            {"cell","999999,0"},{"item","potion,-1,0"},{"end","0"}
+        };
+        for(const auto& change:invalid){
+            alteredSave(change.first,change.second);
+            const int previousGold=d.gold,previousHp=d.hero().hp;const auto previousZone=d.zoneId;
+            check(!d.load(dir/"altered.sav",why),std::string("reject invalid ")+change.first+"="+change.second);
+            check(d.gold==previousGold&&d.hero().hp==previousHp&&d.zoneId==previousZone&& &d.game.M()==&d.map,"failed load preserves current campaign");
+        }
+        // Autosaving immediately after a boss must retain the unclaimed reward, including older files.
+        Campaign reward;reward.newGame(combat::Class::Warrior);reward.enterZone("lair",'@');
+        int matriarch=-1;for(size_t i=1;i<reward.game.actors.size();++i)if(reward.game.actors[i].kind==Kind::Matriarch)matriarch=int(i);
+        check(matriarch>0,"matriarch exists for reward regression");
+        auto& dead=reward.game.actors[size_t(matriarch)];dead.hp=0;
+        reward.game.events.push_back({combat::Event::Death,0,matriarch,0,dead.cell,""});reward.processEvents();
+        check(reward.autosavePending&&reward.rewardChoices.size()==3,"boss creates pending reward and autosave");
+        check(reward.save(dir/"reward.sav",why),"save before choosing reward");
+        Campaign pending;check(pending.load(dir/"reward.sav",why),"load pending reward");
+        check(pending.rewardChoices.size()==3&&pending.requests.back().first==Request::RewardChoice,"reload restores reward window request");
+        for(const auto& actor:pending.game.actors)check(actor.kind!=Kind::Matriarch||!actor.alive(),"reward recovery does not respawn boss");
+        pending.autosavePending=false;pending.chooseReward(0);
+        check(pending.autosavePending&&pending.count("chitin_blade")==1,"claiming reward requests another autosave");
+        check(pending.save(dir/"reward.sav",why)&&reward.load(dir/"reward.sav",why),"save claimed reward");
+        check(reward.rewardChoices.empty()&&reward.flags.count("reward_spider")&&reward.count("chitin_blade")==1,"claimed reward remains claimed");
+        reward.chooseReward(0);check(reward.count("chitin_blade")==1,"reward cannot be claimed twice");
         // death rules
         c.gold=200;c.flags.insert("shrine:shrine_village");c.killed["road"].insert(1);c.respawnAtShrine();
         check(c.gold==180&&c.killed.empty()&&c.flags.count("boss_matriarch"),"respawn keeps progress, loses 10% gold");

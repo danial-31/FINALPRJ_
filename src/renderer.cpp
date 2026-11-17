@@ -111,8 +111,10 @@ Renderer::Renderer(const fs::path& r):root(r){
     }
     glBindFramebuffer(GL_FRAMEBUFFER,0);
     glEnable(GL_PROGRAM_POINT_SIZE);
+    for(auto& q:gpuQueries)glGenQueries(GLsizei(q.stamps.size()),q.stamps.data());
 }
 Renderer::~Renderer(){
+    for(auto& q:gpuQueries)glDeleteQueries(GLsizei(q.stamps.size()),q.stamps.data());
     for(GLuint p:{scene,shadow,pointShadow,blur,post,sky,particle,uiProgram})glDeleteProgram(p);
     glDeleteVertexArrays(1,&screenVao);glDeleteVertexArrays(1,&particleVao);glDeleteBuffers(1,&particleVbo);
     glDeleteFramebuffers(1,&shadowFbo);glDeleteTextures(1,&shadowTexture);
@@ -148,8 +150,31 @@ void Renderer::resizeTargets(int w,int h){
     glBindFramebuffer(GL_FRAMEBUFFER,0);
 }
 void Renderer::setZone(const ZoneVisuals& v){
-    zoneMesh.update(v.mesh);zoneSolid.update(v.solid);
-    lights=v.lights;emitters=v.emitters;cubeCached=false;cubeLights[0]=cubeLights[1]=-1;
+    zoneMesh.update(v.mesh);zoneSolid.update(v.solid);zoneAnimated.update(v.animated);
+    terrainLights=v.lights;terrainEmitters=v.emitters;
+    // Only deforming triangles within a torch's reach need redrawing in its six faces.
+    animatedShadowMeshes.clear();animatedShadowMeshes.resize(terrainLights.size());
+    for(size_t light=0;light<terrainLights.size();++light){
+        if(!terrainLights[light].shadow)continue;
+        Mesh nearLight;
+        for(size_t i=0;i+2<v.animated.vertices.size();i+=3){
+            glm::vec3 lo=v.animated.vertices[i].position,hi=lo;
+            for(size_t j=1;j<3;++j){lo=glm::min(lo,v.animated.vertices[i+j].position);hi=glm::max(hi,v.animated.vertices[i+j].position);}
+            float wind=.2f+.061f*std::max(std::abs(lo.y),std::abs(hi.y));
+            lo-=glm::vec3(wind);hi+=glm::vec3(wind);
+            glm::vec3 delta=terrainLights[light].position-glm::clamp(terrainLights[light].position,lo,hi);
+            if(glm::dot(delta,delta)<=cubeFar*cubeFar)
+                nearLight.vertices.insert(nearLight.vertices.end(),v.animated.vertices.begin()+i,v.animated.vertices.begin()+i+3);
+        }
+        animatedShadowMeshes[light]=std::make_unique<GpuMesh>(nearLight);
+    }
+    cubeCached=false;
+    setZoneObjects(v);
+}
+void Renderer::setZoneObjects(const ZoneVisuals& v){
+    zoneObjects.update(v.objects);zoneObjectSolid.update(v.objectSolid);
+    lights=terrainLights;lights.insert(lights.end(),v.objectLights.begin(),v.objectLights.end());
+    emitters=terrainEmitters;emitters.insert(emitters.end(),v.objectEmitters.begin(),v.objectEmitters.end());
 }
 static float fractf(float a){return a-std::floor(a);}
 std::vector<Particle> Renderer::particles(float time,glm::vec3 focus,const RenderSettings& s) const{
@@ -191,7 +216,35 @@ std::vector<Particle> Renderer::particles(float time,glm::vec3 focus,const Rende
         p.x+=std::sin(time*.35f+sd)*.15f;out.push_back({p,{.28f,.35f,.32f},.012f,.25f,1});}
     return out;
 }
+void Renderer::collectGpuTimings(){
+    for(auto& q:gpuQueries){
+        if(q.pending){
+            GLint ready=0;glGetQueryObjectiv(q.stamps.back(),GL_QUERY_RESULT_AVAILABLE,&ready);
+            if(ready){
+                std::array<GLuint64,5> t{};
+                for(size_t i=0;i<t.size();++i)glGetQueryObjectui64v(q.stamps[i],GL_QUERY_RESULT,&t[i]);
+                gpuTimings.pointShadowsMs=double(t[1]-t[0])*1.e-6;
+                gpuTimings.sunShadowMs=double(t[2]-t[1])*1.e-6;
+                gpuTimings.sceneMs=double(t[3]-t[2])*1.e-6;
+                gpuTimings.postMs=double(t[4]-t[3])*1.e-6;
+                ++gpuTimings.samples;q.pending=false;
+                gpuTotals.pointShadowsMs+=gpuTimings.pointShadowsMs;
+                gpuTotals.sunShadowMs+=gpuTimings.sunShadowMs;
+                gpuTotals.sceneMs+=gpuTimings.sceneMs;
+                gpuTotals.postMs+=gpuTimings.postMs;
+                ++gpuTotals.samples;
+            }
+        }
+    }
+}
 void Renderer::render(const FrameInput& f,const RenderSettings& s,const GpuMesh& dyn,const GpuMesh& hero,const glm::mat4& heroModel,const std::vector<Particle>& extra){
+    QueryFrame* timing=nullptr;
+    if(profileGpu){
+        collectGpuTimings();
+        auto& q=gpuQueries[queryFrame++%gpuQueries.size()];
+        // Never wait for the GPU just to collect profiling data.
+        if(!q.pending){timing=&q;q.pending=true;glQueryCounter(q.stamps[0],GL_TIMESTAMP);}
+    }
     resizeTargets(f.width,f.height);
     int wantShadow=s.shadowQuality==1?1024:2048;resizeShadow(wantShadow);
     glm::mat4 vp=f.projection*f.view;
@@ -203,19 +256,17 @@ void Renderer::render(const FrameInput& f,const RenderSettings& s,const GpuMesh&
     if(order.size()>16)order.resize(16);
     int cube[2]={-1,-1};int found=0;
     for(size_t i=0;i<order.size()&&found<2;++i)if(lights[size_t(order[i])].shadow)cube[found++]=int(i);
-    if(cube[0]!=cubeLights[0]||cube[1]!=cubeLights[1]){cubeCached=false;cubeLights[0]=cube[0];cubeLights[1]=cube[1];}
     // keep cache keyed by light identity, not by sorted slot
-    static int cachedIds[2]={-2,-2};
     int ids[2]={cube[0]>=0?order[size_t(cube[0])]:-1,cube[1]>=0?order[size_t(cube[1])]:-1};
-    if(ids[0]!=cachedIds[0]||ids[1]!=cachedIds[1]){cubeCached=false;cachedIds[0]=ids[0];cachedIds[1]=ids[1];}
+    if(ids[0]!=cachedLightIds[0]||ids[1]!=cachedLightIds[1]){cubeCached=false;cachedLightIds[0]=ids[0];cachedLightIds[1]=ids[1];}
 
     glDisable(GL_BLEND);glEnable(GL_DEPTH_TEST);glDepthMask(GL_TRUE);
     auto drawScene=[&](GLuint program,bool culled){
         setMatrix(program,"model",glm::mat4(1));
         if(culled){glEnable(GL_CULL_FACE);glCullFace(GL_BACK);}
-        zoneSolid.draw();
+        zoneSolid.draw();zoneObjectSolid.draw();
         glDisable(GL_CULL_FACE);
-        zoneMesh.draw();
+        zoneMesh.draw();zoneAnimated.draw();zoneObjects.draw();
         // Only scenery obstructs the view. Tall characters and their weapons
         // extend into the same camera-space cutaway volume as nearby walls.
         if(program==scene)setFloat(scene,"cutaway",0.f);
@@ -243,11 +294,14 @@ void Renderer::render(const FrameInput& f,const RenderSettings& s,const GpuMesh&
                 glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER,GL_DEPTH_ATTACHMENT,GL_TEXTURE_CUBE_MAP_POSITIVE_X+face,cubes[l],0);
                 glBlitFramebuffer(0,0,cubeSize,cubeSize,0,0,cubeSize,cubeSize,GL_DEPTH_BUFFER_BIT,GL_NEAREST);
                 glBindFramebuffer(GL_FRAMEBUFFER,cubeFbo);
-                setMatrix(pointShadow,"model",glm::mat4(1));dyn.draw();setMatrix(pointShadow,"model",heroModel);hero.draw();
+                setMatrix(pointShadow,"model",glm::mat4(1));
+                if(ids[l]<int(animatedShadowMeshes.size())&&animatedShadowMeshes[size_t(ids[l])])animatedShadowMeshes[size_t(ids[l])]->draw();
+                zoneObjects.draw();zoneObjectSolid.draw();dyn.draw();setMatrix(pointShadow,"model",heroModel);hero.draw();
             }
         }
         cubeCached=true;
     }
+    if(timing)glQueryCounter(timing->stamps[1],GL_TIMESTAMP);
     // Sun shadow map fitted around the camera focus (texel-snapped to avoid shimmering).
     const float extent=30.f,depthRange=90.f;
     glm::vec3 key=glm::normalize(f.keyDirection);
@@ -262,6 +316,7 @@ void Renderer::render(const FrameInput& f,const RenderSettings& s,const GpuMesh&
         glUseProgram(shadow);setMatrix(shadow,"lightMatrix",lightMatrix);setFloat(shadow,"time",f.time);
         glEnable(GL_POLYGON_OFFSET_FILL);glPolygonOffset(2.f,3.f);drawScene(shadow,false);glDisable(GL_POLYGON_OFFSET_FILL);
     }
+    if(timing)glQueryCounter(timing->stamps[2],GL_TIMESTAMP);
     // HDR scene
     glBindFramebuffer(GL_FRAMEBUFFER,hdrFbo);glViewport(0,0,f.width,f.height);
     glClearColor(.007f,.011f,.018f,1);glClear(GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT);
@@ -296,7 +351,7 @@ void Renderer::render(const FrameInput& f,const RenderSettings& s,const GpuMesh&
     setVec3(scene,"ambientLow",ambLow);setVec3(scene,"ambientHigh",ambHigh);setVec3(scene,"fogColor",fog);setFloat(scene,"fogDensity",fogDensity);
     setFloat(scene,"corruption",f.corruption);setFloat(scene,"time",f.time);
     setVec3(scene,"heroPos",f.heroPos);setFloat(scene,"cutaway",f.cutaway);
-    setInt(scene,"shadowsOn",shadowsOn);setFloat(scene,"shadowExtent",extent*2);setFloat(scene,"shadowDepthRange",depthRange-.1f);
+    setInt(scene,"shadowsOn",shadowsOn);setInt(scene,"lowShadows",s.shadowQuality==1);setFloat(scene,"shadowExtent",extent*2);setFloat(scene,"shadowDepthRange",depthRange-.1f);
     std::vector<glm::vec3> positions,colors;std::vector<float> radii;
     float flickerTime=f.time;
     for(size_t i=0;i<order.size();++i){const auto& l=lights[size_t(order[i])];
@@ -329,10 +384,11 @@ void Renderer::render(const FrameInput& f,const RenderSettings& s,const GpuMesh&
         glEnable(GL_BLEND);glBlendFunc(GL_SRC_ALPHA,GL_ONE);glDepthMask(GL_FALSE);
         glDrawArrays(GL_POINTS,0,GLsizei(points.size()));glDepthMask(GL_TRUE);glDisable(GL_BLEND);
     }
+    if(timing)glQueryCounter(timing->stamps[3],GL_TIMESTAMP);
     glDisable(GL_DEPTH_TEST);
     // bloom
     glBindVertexArray(screenVao);glUseProgram(blur);setInt(blur,"source",0);glActiveTexture(GL_TEXTURE0);
-    int passes=s.effects==0?2:6;
+    int passes=s.effects==0?0:s.effects==1?2:6;
     for(int i=0;i<passes;++i){
         glBindFramebuffer(GL_FRAMEBUFFER,blurFbo[i%2]);glViewport(0,0,std::max(1,f.width/2),std::max(1,f.height/2));
         glBindTexture(GL_TEXTURE_2D,i==0?hdrColor:blurTexture[(i-1)%2]);
@@ -340,11 +396,12 @@ void Renderer::render(const FrameInput& f,const RenderSettings& s,const GpuMesh&
     }
     glBindFramebuffer(GL_FRAMEBUFFER,0);glViewport(0,0,f.width,f.height);glUseProgram(post);
     glActiveTexture(GL_TEXTURE0);glBindTexture(GL_TEXTURE_2D,hdrColor);setInt(post,"scene",0);
-    glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,blurTexture[(passes-1)%2]);setInt(post,"bloom",1);
+    glActiveTexture(GL_TEXTURE1);glBindTexture(GL_TEXTURE_2D,passes?blurTexture[(passes-1)%2]:hdrColor);setInt(post,"bloom",1);
     glActiveTexture(GL_TEXTURE2);glBindTexture(GL_TEXTURE_2D,hdrDepth);setInt(post,"depth",2);
     setFloat(post,"time",f.time);setFloat(post,"nearPlane",s.perspective?f.near:0.1f);setFloat(post,"farPlane",f.far);
-    setInt(post,"perspectiveCamera",s.perspective);setInt(post,"tiltShift",s.tiltShift);setInt(post,"effects",s.effects>0);
-    setFloat(post,"bloomStrength",s.effects==0?.05f:.10f);setFloat(post,"exposure",f.surface?.92f:1.4f);setFloat(post,"saturation",f.surface?1.35f:1.12f);setFloat(post,"fade",f.fade);
+    setInt(post,"perspectiveCamera",s.perspective);setInt(post,"tiltShift",s.tiltShift&&s.effects>0);setInt(post,"effects",s.effects>0);
+    setFloat(post,"bloomStrength",s.effects==0?0.f:.10f);setFloat(post,"exposure",f.surface?.92f:1.4f);setFloat(post,"saturation",f.surface?1.35f:1.12f);setFloat(post,"fade",f.fade);
     glDrawArrays(GL_TRIANGLES,0,3);
     glActiveTexture(GL_TEXTURE0);
+    if(timing)glQueryCounter(timing->stamps[4],GL_TIMESTAMP);
 }

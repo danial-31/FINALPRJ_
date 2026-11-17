@@ -21,6 +21,7 @@ uniform int shadowLight0, shadowLight1;   // indices of the lights that own a cu
 uniform float pointShadowFar;
 uniform float shadowExtent, shadowDepthRange; // orthographic size of the sun shadow camera
 uniform bool shadowsOn;                    // headline technique toggle
+uniform bool lowShadows;
 uniform vec3 keyDirection;
 uniform vec3 keyColor;
 uniform vec3 ambientLow, ambientHigh;
@@ -82,7 +83,9 @@ float shadowVisibility(vec3 n, vec3 light)
     vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
     float blockerDepth = 0.0;
     float blockers = 0.0;
-    for (int i = 0; i < 8; ++i) {
+    int blockerSamples = lowShadows ? 4 : 8;
+    int filterSamples = lowShadows ? 8 : 16;
+    for (int i = 0; i < blockerSamples; ++i) {
         float depth = texture(shadowMap, p.xy + shadowDisk[i] * texel * 7.0).r;
         if (depth < p.z - bias) { blockerDepth += depth; blockers += 1.0; }
     }
@@ -90,9 +93,9 @@ float shadowVisibility(vec3 n, vec3 light)
     float separation = max(p.z - blockerDepth / blockers, 0.0) * shadowDepthRange;
     float filterRadius = clamp(separation * 0.045 / shadowExtent / texel.x, 1.0, 12.0);
     float visible = 0.0;
-    for (int i = 0; i < 16; ++i)
+    for (int i = 0; i < filterSamples; ++i)
         visible += p.z - bias <= texture(shadowMap, p.xy + shadowDisk[i] * texel * filterRadius).r ? 1.0 : 0.0;
-    return visible / 16.0;
+    return visible / float(filterSamples);
 }
 float torchVisibility(int shadowIndex, vec3 n)
 {
@@ -108,7 +111,8 @@ float torchVisibility(int shadowIndex, vec3 n)
     float bias = mix(0.060, 0.035, max(dot(n, -direction), 0.0));
     float radius = mix(0.12, 0.32, clamp(distanceToLight / 12.0, 0.0, 1.0));
     float visible = 0.0;
-    for (int i = 0; i < 16; ++i) {
+    int filterSamples = lowShadows ? 4 : 16;
+    for (int i = 0; i < filterSamples; ++i) {
         vec3 sampleRay = ray + (tangent * shadowDisk[i].x + bitangent * shadowDisk[i].y) * radius;
         float depth;
         // GLSL 330 requires explicit sampler selection, not sampler-array indexing.
@@ -116,7 +120,7 @@ float torchVisibility(int shadowIndex, vec3 n)
         else depth = texture(pointShadow1, sampleRay).r;
         visible += distanceToLight - bias <= depth * pointShadowFar ? 1.0 : 0.0;
     }
-    return visible / 16.0;
+    return visible / float(filterSamples);
 }
 float celDiffuse(float cosine)
 {

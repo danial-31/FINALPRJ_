@@ -3,6 +3,8 @@
 #include "scene.hpp"
 #include "zone_mesh.hpp"
 #include <filesystem>
+#include <array>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -59,11 +61,20 @@ struct FrameInput {
     float cutaway=0;
 };
 
+struct GpuTimings {
+    double pointShadowsMs=0, sunShadowMs=0, sceneMs=0, postMs=0;
+    unsigned samples=0;
+};
+
 class Renderer {
 public:
     explicit Renderer(const fs::path& root);
     ~Renderer();
     void setZone(const ZoneVisuals& v);
+    void setZoneObjects(const ZoneVisuals& v);
+    bool profileGpu=false;
+    GpuTimings gpuTimings, gpuTotals; // latest sample and cumulative sums (divide by samples)
+    void collectGpuTimings();         // polls available queries only; never stalls rendering
     // Draws sky, shadows, scene, dynamic meshes, particles and post-processing into the default framebuffer.
     void render(const FrameInput& f, const RenderSettings& s, const GpuMesh& dynamicMesh, const GpuMesh& heroMesh, const glm::mat4& heroModel,
                 const std::vector<Particle>& extraParticles);
@@ -76,8 +87,15 @@ private:
     GLuint screenVao=0, particleVao=0, particleVbo=0;
     GLuint shadowFbo=0, shadowTexture=0; int shadowSize=0;
     GLuint hdrFbo=0, hdrColor=0, hdrDepth=0, blurFbo[2]{}, blurTexture[2]{}; int width=0, height=0;
-    GLuint cubeFbo=0, cubeCacheFbo=0, cubes[4]{}; bool cubeCached=false; int cubeLights[2]{-1,-1};
-    GpuMesh zoneMesh, zoneSolid;
+    GLuint cubeFbo=0, cubeCacheFbo=0, cubes[4]{}; bool cubeCached=false;
+    GpuMesh zoneMesh, zoneSolid, zoneAnimated, zoneObjects, zoneObjectSolid;
+    std::vector<std::unique_ptr<GpuMesh>> animatedShadowMeshes;
+    std::vector<ZoneLight> terrainLights;
+    std::vector<Emitter> terrainEmitters;
+    int cachedLightIds[2]{-2,-2};
+    struct QueryFrame { std::array<GLuint,5> stamps{}; bool pending=false; };
+    std::array<QueryFrame,4> gpuQueries{};
+    unsigned queryFrame=0;
     std::vector<ZoneLight> lights;
     std::vector<Emitter> emitters;
     void resizeTargets(int w, int h);

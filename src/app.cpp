@@ -6,6 +6,9 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <iomanip>
+#include <numeric>
+#include <sstream>
 
 using world::Cell;
 using combat::Phase;
@@ -13,6 +16,7 @@ using combat::Phase;
 static bool automated(const LaunchOptions& o){return o.smoke||o.benchmark||!o.capture.empty();}
 
 App::App(GLFWwindow* w,const fs::path& r,const LaunchOptions& o):window(w),root(r),options(o){
+    gpuName=reinterpret_cast<const char*>(glGetString(GL_RENDERER));
     saveDir=root/(automated(o)?"test-saves":"saves");   // automated runs never touch player saves
     settings.load(root/"settings.ini");
     if(automated(o)){settings.vsync=false;settings.fullscreen=false;}
@@ -81,8 +85,8 @@ App::App(GLFWwindow* w,const fs::path& r,const LaunchOptions& o):window(w),root(
 App::~App(){if(!automated(options))settings.save(root/"settings.ini");}
 
 rpg::Campaign& App::world(){return screen==Screen::Game?game:menuWorld;}
-bool App::held(int k) const{return glfwGetKey(window,k)==GLFW_PRESS;}
-bool App::key(int k){bool down=glfwGetKey(window,k)==GLFW_PRESS;bool edge=down&&!keys[size_t(k)];keys[size_t(k)]=down;return edge;}
+bool App::held(int k) const{return !options.benchmark&&glfwGetKey(window,k)==GLFW_PRESS;}
+bool App::key(int k){bool down=held(k);bool edge=down&&!keys[size_t(k)];keys[size_t(k)]=down;return edge;}
 fs::path App::slotPath(int slot) const{return saveDir/(slot==0?std::string("autosave.sav"):"slot"+std::to_string(slot)+".sav");}
 
 void App::applySettings(bool windowMode){
@@ -113,7 +117,8 @@ bool App::loadSlot(const fs::path& path){
     if(!loaded.load(path,error)){status="Не удалось загрузить: "+error;std::cerr<<status<<'\n';return false;}
     game=std::move(loaded);game.game.setMap(&game.map);
     screen=Screen::Game;win=Window::None;stack.clear();floaters.clear();pendingInteract=-1;
-    game.requests.clear();syncActors(true);refreshVisuals(true);fade=0;fadeTarget=1;
+    syncActors(true);refreshVisuals(true);fade=0;fadeTarget=1;
+    handleRequests();
     game.toast("Игра загружена.",0);lastToastCount=int(game.toasts.size());
     return true;
 }
@@ -168,17 +173,19 @@ void App::syncActors(bool snap,float dt){
 void App::refreshVisuals(bool force){
     auto& c=world();
     std::uint32_t h=entityStateHash(c);
-    if(!force&&h==visualHash&&visualZone==c.zoneId)return;
+    const bool full=force||visualZone!=c.zoneId||visuals.cleansed!=(c.flags.count("boss_keeper")!=0);
+    if(!full&&h==visualHash)return;
     if(!force&&visualZone==c.zoneId&&screen==Screen::Game)audio->play(Sfx::Door,.6f);
     visualHash=h;visualZone=c.zoneId;
-    buildZoneVisuals(c,visuals);renderer->setZone(visuals);
+    if(full){buildZoneVisuals(c,visuals);renderer->setZone(visuals);}
+    else{updateZoneObjects(c,visuals);renderer->setZoneObjects(visuals);}
 }
 
 // ------------------------------------------------------------------ camera and picking
 void App::updateCamera(float dt){
     float sens=settings.cameraSensitivity;
     double mx,my;glfwGetCursorPos(window,&mx,&my);
-    bool middle=glfwGetMouseButton(window,GLFW_MOUSE_BUTTON_MIDDLE)==GLFW_PRESS;
+    bool middle=!options.benchmark&&glfwGetMouseButton(window,GLFW_MOUSE_BUTTON_MIDDLE)==GLFW_PRESS;
     bool altDrag=held(GLFW_KEY_LEFT_ALT)&&glfwGetMouseButton(window,GLFW_MOUSE_BUTTON_LEFT)==GLFW_PRESS;
     if(freeCamera){
         bool look=glfwGetMouseButton(window,GLFW_MOUSE_BUTTON_RIGHT)==GLFW_PRESS||middle;
@@ -492,8 +499,9 @@ void App::frameStep(float dt){
     int w,h;glfwGetFramebufferSize(window,&w,&h);
     double mx,my;glfwGetCursorPos(window,&mx,&my);int ww,wh;glfwGetWindowSize(window,&ww,&wh);
     glm::vec2 cursor(float(mx)*float(w)/float(std::max(1,ww)),float(my)*float(h)/float(std::max(1,wh)));
-    bool left=glfwGetMouseButton(window,GLFW_MOUSE_BUTTON_LEFT)==GLFW_PRESS;
-    bool right=glfwGetMouseButton(window,GLFW_MOUSE_BUTTON_RIGHT)==GLFW_PRESS;
+    bool left=!options.benchmark&&glfwGetMouseButton(window,GLFW_MOUSE_BUTTON_LEFT)==GLFW_PRESS;
+    bool right=!options.benchmark&&glfwGetMouseButton(window,GLFW_MOUSE_BUTTON_RIGHT)==GLFW_PRESS;
+    if(options.benchmark)cursor={-1000,-1000};
     ui.begin(w,h,cursor,left,left&&!lastLeft,!left&&lastLeft,right&&!lastRight);
     realTime+=dt;
     RenderSettings rs;
@@ -530,7 +538,7 @@ void App::frameStep(float dt){
         focus=heroPos+glm::vec3(0,1.f,0);
         pick();
         bool live=win==Window::None||win==Window::Inventory||win==Window::Character||win==Window::Journal||win==Window::Map;
-        if(win==Window::None&&pendingBossWindow==Window::None)gameInput(dt);else lastRight=right;
+        if(win==Window::None&&pendingBossWindow==Window::None&&!options.benchmark)gameInput(dt);else lastRight=right;
         if(live&&pendingBossWindow==Window::None)game.game.update(dt);
         followHero(dt);
         consumeEvents();
@@ -602,12 +610,84 @@ void App::frameStep(float dt){
     lastLeft=left;
     ++frame;
 }
+int App::runBenchmark(){
+    // Reset the complete scenario for each mode/repeat. Fixed simulation steps make
+    // combat identical even when one GPU renders faster. glFinish is benchmark-only:
+    // samples measure a completed frame, not merely the CPU's command submission.
+    const char* zones[]={"village","road","lair","throne","castle"};
+    constexpr int repeats=3,warmup=30,frames=90;
+    settings=Settings{};settings.vsync=false;settings.fullscreen=false;
+    glfwSwapInterval(0);glfwSetWindowSize(window,1280,720);
+    audio->volumes(0,0,0);
+    renderer->profileGpu=true;
+    std::ofstream csv(root/"benchmark.csv");
+    if(!csv)throw std::runtime_error("Cannot write benchmark.csv");
+    csv<<"gpu,zone,shadows,repeat,width,height,frames,fps,mean_ms,median_ms,p95_ms,gpu_point_ms,gpu_sun_ms,gpu_scene_ms,gpu_post_ms\n";
+    auto state=[&]{
+        std::ostringstream out;out<<std::setprecision(9)<<game.zoneId<<' '<<game.game.rng<<' '<<game.game.time;
+        for(const auto& a:game.game.actors)out<<' '<<int(a.kind)<<':'<<a.hp<<':'<<a.pos.x<<':'<<a.pos.y<<':'<<a.mana;
+        return out.str();
+    };
+    for(const char* zone:zones){
+        std::string reference;
+        for(int mode=1;mode>=0;--mode)for(int repeat=0;repeat<repeats;++repeat){
+            game=rpg::Campaign{};animTime=realTime=0;freeCamera=false;animPaused=false;
+            heroAction={};heroFall={};actorGait.clear();actorYaw.clear();floaters.clear();
+            clickTimer=0;hoverActor=hoverEntity=hoverAbility=-1;scroll=0;keys.fill(false);
+            settings.technique=mode!=0;
+            startNewGame(combat::Class::Warrior);game.enterZone(zone,'@');
+            if(std::string(zone)=="road"||std::string(zone)=="lair"||std::string(zone)=="throne"){
+                for(size_t i=1;i<game.game.actors.size();++i){
+                    const auto& enemy=game.game.actors[i];
+                    if(!enemy.alive()||enemy.kind==combat::Kind::Pylon)continue;
+                    Cell at=enemy.cell;
+                    for(Cell d:{Cell{0,2},Cell{2,0},Cell{-2,0},Cell{0,-2}}){Cell q{at.x+d.x,at.y+d.y};
+                        if(!game.map.blocked(q.x,q.y)&&game.game.occupant(q)<0){game.game.place(0,q);break;}}
+                    game.game.engage(int(i));game.game.attackUnit(int(i));break;
+                }
+            }
+            game.requests.clear();game.autosavePending=false;syncActors(true);refreshVisuals(true);
+            win=Window::None;fade=fadeTarget=1;lightAngle=.95f;lightElevation=.95f;updateCamera(0);
+            for(int i=0;i<warmup;++i){glfwPollEvents();frameStep(1.f/60);glfwSwapBuffers(window);}
+            glFinish();renderer->collectGpuTimings();
+            const auto gpuBefore=renderer->gpuTotals;
+            std::vector<double> samples;samples.reserve(frames);
+            for(int i=0;i<frames;++i){
+                glfwPollEvents();double begin=glfwGetTime();
+                frameStep(1.f/60);glfwSwapBuffers(window);glFinish();
+                samples.push_back((glfwGetTime()-begin)*1000.);
+            }
+            renderer->collectGpuTimings();
+            const auto gpuAfter=renderer->gpuTotals;
+            const double gpuSamples=double(gpuAfter.samples-gpuBefore.samples);
+            if(gpuSamples<=0)throw std::runtime_error("GPU timing queries returned no samples");
+            const auto endState=state();
+            if(reference.empty())reference=endState;
+            else if(reference!=endState)throw std::runtime_error(std::string("Benchmark scenario diverged in ")+zone);
+            double mean=std::accumulate(samples.begin(),samples.end(),0.)/samples.size();
+            std::sort(samples.begin(),samples.end());
+            double median=(samples[frames/2-1]+samples[frames/2])*.5;
+            double p95=samples[size_t(std::ceil(frames*.95))-1];
+            int width,height;glfwGetFramebufferSize(window,&width,&height);
+            csv<<std::quoted(gpuName)<<','<<zone<<','<<(mode?"on":"off")<<','<<repeat+1<<','<<width<<','<<height<<','<<frames<<','
+               <<1000./mean<<','<<mean<<','<<median<<','<<p95<<','
+               <<(gpuAfter.pointShadowsMs-gpuBefore.pointShadowsMs)/gpuSamples<<','
+               <<(gpuAfter.sunShadowMs-gpuBefore.sunShadowMs)/gpuSamples<<','
+               <<(gpuAfter.sceneMs-gpuBefore.sceneMs)/gpuSamples<<','
+               <<(gpuAfter.postMs-gpuBefore.postMs)/gpuSamples<<'\n';csv.flush();
+            std::cout<<"Benchmark "<<zone<<" shadows "<<(mode?"on":"off")<<" repeat "<<repeat+1
+                     <<": "<<int(1000./mean)<<" FPS, median "<<median<<" ms, p95 "<<p95<<" ms\n"<<std::flush;
+        }
+    }
+    std::cout<<"Benchmark complete: identical simulation states; 1280x720, high quality, synchronized completed frames.\n";
+    return 0;
+}
+
 int App::run(){
-    if(options.smoke||options.benchmark){
+    if(options.benchmark)return runBenchmark();
+    if(options.smoke){
         struct Case{const char* zone;bool battle;};
         std::vector<Case> cases={{"village",false},{"road",true},{"grove",false},{"lair",true},{"mine",false},{"flooded",false},{"pass",false},{"crypt",true},{"throne",true},{"castle",false},{"heart",true}};
-        if(options.benchmark)cases={{"village",false},{"road",true},{"lair",true},{"throne",true},{"castle",false}};
-        std::ofstream csv;if(options.benchmark){csv.open(root/"benchmark.csv");csv<<"zone,technique,fps,frame_ms\n";}
         startNewGame(combat::Class::Warrior);
         if(options.smoke){
             // Scripted session through the real input code: talk, activate the shrine, leave the village, fight.
@@ -644,6 +724,24 @@ int App::run(){
             game.respawnAtShrine();win=Window::None;handleRequests();
             require(game.hero().alive()&&!heroFall.active(),"revived at the shrine with the standing pose");
             std::cout<<"Scripted session finished in zone "<<game.zoneId<<", hero HP "<<game.hero().hp<<'\n';
+
+            // Exercise presentation of recovered rewards and the final dialog,
+            // which the headless campaign tests cannot observe.
+            startNewGame(combat::Class::Mage);game.game.grantXp(100);game.game.events.clear();
+            game.flags.insert("boss_matriarch");
+            std::string error;const auto recovery=saveDir/"reward-recovery.sav";
+            require(game.save(recovery,error),"saved pending boss reward");
+            require(loadSlot(recovery)&&game.hero().maxMana==168.f,"load preserves level mana");
+            require(frames(60,[&]{return win==Window::Reward;}),"load restores reward window");
+            game.chooseReward(2);win=Window::None;autosave();
+            rpg::Campaign restored;
+            require(restored.load(slotPath(0),error)&&restored.flags.count("reward_spider")&&restored.rewardChoices.empty(),"claimed reward autosaved once");
+            game.quests["main"]=10;game.enterZone("village",'@');handleRequests();
+            clickEntity("elder");
+            require(frames(900,[&]{return win==Window::Dialog;}),"final conversation opens before ending");
+            require(game.stage("main")==10,"final quest waits for dialog completion");
+            game.dialogAction("finish_campaign");handleRequests();
+            require(win==Window::Ending&&game.stage("main")==11,"final dialog opens ending screen");
         }
         for(const auto& cs:cases){
             game.enterZone(cs.zone,'@');if(game.hero().cell.x<0)game.enterZone(cs.zone,'[');
@@ -651,22 +749,24 @@ int App::run(){
             if(cs.battle){int t=-1;for(size_t i=1;i<game.game.actors.size();++i)if(game.game.actors[i].alive()&&game.game.actors[i].kind!=combat::Kind::Pylon){t=int(i);break;}
                 if(t>0){Cell tc=game.game.actors[size_t(t)].cell;for(Cell d:{Cell{0,2},Cell{2,0},Cell{-2,0},Cell{0,-2}}){Cell q{tc.x+d.x,tc.y+d.y};if(!game.map.blocked(q.x,q.y)&&game.game.occupant(q)<0){game.game.place(0,q);break;}}
                     syncActors(true);game.game.engage(t);}}
-            for(int tech=1;tech>=(options.benchmark?0:1);--tech){
-                settings.technique=tech==1;
-                if(options.benchmark){glfwSetWindowSize(window,1280,720);}
-                int frames=options.benchmark?150:12;
+            {
+                settings.technique=true;
+                int frames=12;
                 for(int i=0;i<10;++i){glfwPollEvents();frameStep(1.f/60);glfwSwapBuffers(window);}
                 glFinish();double t0=glfwGetTime();
                 for(int i=0;i<frames;++i){glfwPollEvents();frameStep(1.f/60);glfwSwapBuffers(window);}
                 glFinish();double t1=glfwGetTime();double fpsMeasured=frames/(t1-t0);
-                std::cout<<"Zone "<<cs.zone<<(cs.battle?" (battle)":"")<<" technique "<<(tech?"on ":"off")<<": "<<int(fpsMeasured)<<" FPS\n";
-                if(csv)csv<<cs.zone<<','<<(tech?"on":"off")<<','<<fpsMeasured<<','<<1000.0/fpsMeasured<<'\n';
+                std::cout<<"Zone "<<cs.zone<<(cs.battle?" (battle)":"")<<" shadows on: "<<int(fpsMeasured)<<" FPS\n";
             }
             if(options.smoke){int w,h;glfwGetFramebufferSize(window,&w,&h);capture(root/"captures"/(std::string("smoke-")+cs.zone+".ppm"),w,h);}
         }
         if(options.smoke){
             for(auto size:{std::pair{1024,640},std::pair{1280,720},std::pair{800,900}}){glfwSetWindowSize(window,size.first,size.second);for(int i=0;i<3;++i){glfwPollEvents();frameStep(1.f/60);glfwSwapBuffers(window);}}
-            std::cout<<"Smoke test: all zones rendered, resize checks completed.\n";
+            for(int quality=0;quality<3;++quality){
+                settings.shadowQuality=quality;settings.effects=quality;
+                for(int i=0;i<3;++i){glfwPollEvents();frameStep(1.f/60);glfwSwapBuffers(window);}
+            }
+            std::cout<<"Smoke test: all zones rendered, resize and quality checks completed.\n";
         }
         return 0;
     }

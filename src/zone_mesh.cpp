@@ -771,7 +771,7 @@ struct Builder {
                 case '=':shallow(x,y);break;
                 case 'w':floorWeb(x,y);break;
                 case 'p':poison(x,y);break;
-                case '^':trap(x,y);break;
+                case '^':break; // traps belong to the mutable object layer
                 case 'c':cart(x,y);break;
                 case 'x':crates(x,y);break;
                 case 'f':fence(x,y);break;
@@ -798,6 +798,16 @@ struct Builder {
             if(biome==2)for(int k=0;k<6;++k)emit(at(int(hash(k,1)*float(map.width)),int(hash(k,2)*float(map.height)),1.2f),3,1);
             if(biome==14){for(int k=0;k<4;++k)emit(at(map.width/2+int((hash(k,3)-.5f)*10),5+int(hash(k,4)*6),.2f),5,1.5f);}
         }
+        backdrop();
+        // Village festival after the final victory.
+        if(c.zoneId=="village"&&c.flags.count("boss_keeper")){
+            for(int k=0;k<10;++k){vec3 p=at(9+k*2,11,3.2f);out.mesh.sphere(p,vec3(.18f),k%2?vec3(1.f,.6f,.2f):vec3(1.f,.3f,.2f),mat::Ember,7,5);
+                if(k>0)out.mesh.beam(at(9+(k-1)*2,11,3.25f),p,.01f,{.2f,.15f,.1f},mat::Wood,3);if(k%3==0)light(p,{1.6f,.8f,.3f},4.f);}
+        }
+    }
+    void objects(){
+        for(int y=0;y<map.height;++y)for(int x=0;x<map.width;++x)
+            if(map.at(x,y)==Tile::Trap)trap(x,y);
         for(const auto& e:c.entities){
             if(e.hidden&&e.def.type!=EntityType::Herb)continue;
             switch(e.def.type){
@@ -812,20 +822,34 @@ struct Builder {
             default:prop(e);break;
             }
         }
-        backdrop();
-        // Village festival after the final victory.
-        if(c.zoneId=="village"&&c.flags.count("boss_keeper")){
-            for(int k=0;k<10;++k){vec3 p=at(9+k*2,11,3.2f);out.mesh.sphere(p,vec3(.18f),k%2?vec3(1.f,.6f,.2f):vec3(1.f,.3f,.2f),mat::Ember,7,5);
-                if(k>0)out.mesh.beam(at(9+(k-1)*2,11,3.25f),p,.01f,{.2f,.15f,.1f},mat::Wood,3);if(k%3==0)light(p,{1.6f,.8f,.3f},4.f);}
-        }
     }
 };
 }
 
 void buildZoneVisuals(const rpg::Campaign& c,ZoneVisuals& out){
     out=ZoneVisuals{};
-    Builder b{c,c.map,out,palette(c.zone().biome)};
+    // Opening doors must not change or regenerate the surrounding ground/vegetation.
+    const auto terrainMap=rpg::buildMap(c.zone());
+    Builder b{c,terrainMap,out,palette(c.zone().biome)};
     b.build();
+    out.terrainHeights=std::move(b.corner);
+    out.cleansed=c.flags.count("boss_keeper")!=0;
+    for(Mesh* m:{&out.mesh,&out.solid}){
+        auto& vertices=m->vertices;
+        vertices.erase(std::remove_if(vertices.begin(),vertices.end(),[&](const Vertex& v){
+            if(v.material!=mat::Banner&&v.material!=mat::Foliage)return false;
+            out.animated.vertices.push_back(v);return true;
+        }),vertices.end());
+    }
+    updateZoneObjects(c,out);
+}
+void updateZoneObjects(const rpg::Campaign& c,ZoneVisuals& out){
+    ZoneVisuals objects;
+    Builder b{c,c.map,objects,palette(c.zone().biome)};
+    b.corner=out.terrainHeights;b.cornerW=c.map.width;
+    b.objects();
+    out.objects=std::move(objects.mesh);out.objectSolid=std::move(objects.solid);
+    out.objectLights=std::move(objects.lights);out.objectEmitters=std::move(objects.emitters);
 }
 std::uint32_t entityStateHash(const rpg::Campaign& c){
     std::uint32_t h=2166136261u;

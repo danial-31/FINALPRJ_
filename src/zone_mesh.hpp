@@ -14,13 +14,20 @@ struct ZoneLight { glm::vec3 position, color; float radius; bool shadow; };
 struct ZoneVisuals {
     Mesh mesh;                         // two-sided organic shapes (culling off)
     Mesh solid;                        // outward-wound blocks and ground (back-face culled)
+    Mesh animated;                     // shader-deformed scenery, never cached in point shadows
+    Mesh objects, objectSolid;         // interactive scenery, rebuilt independently of terrain
     std::vector<ZoneLight> lights;
     std::vector<Emitter> emitters;
+    std::vector<ZoneLight> objectLights;
+    std::vector<Emitter> objectEmitters;
     std::vector<Torch> torches;        // used by the original throne-room props
+    std::vector<float> terrainHeights;
+    bool cleansed=false;
 };
 
-// Static zone geometry; rebuilt when doors open, chests empty, etc.
+// Build terrain on zone changes; interactive changes only rebuild the small object layer.
 void buildZoneVisuals(const rpg::Campaign& c, ZoneVisuals& out);
+void updateZoneObjects(const rpg::Campaign& c, ZoneVisuals& out);
 // Animated figures (enemies, NPCs) and floor markers; rebuilt every frame.
 inline constexpr float enemyRemainsSeconds=3.25f;
 void buildEnemy(Mesh& m, const combat::Actor& a, glm::vec3 p, float yaw, float phase, float moveWeight,

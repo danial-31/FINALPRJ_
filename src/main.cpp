@@ -6,6 +6,13 @@
 #include <stdexcept>
 #include <string>
 
+#ifdef _WIN32
+// Prefer the discrete GPU on Optimus laptops; Windows per-app preferences take priority.
+extern "C" {
+    __declspec(dllexport) unsigned long NvOptimusEnablement = 1;
+}
+#endif
+
 static void usage(){
     std::cerr<<"Usage: finalprj [--smoke-test] [--benchmark] [--capture out.ppm] [--zone id] [--class warrior|rogue|mage]\n"
                "               [--battle] [--menu] [--no-technique] [--time seconds] [--view close|wide] [--window name]\n";

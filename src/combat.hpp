@@ -150,6 +150,10 @@ private:
     void bossAi(int id, float dt);
     void steer(int id, float dt);
     void planPath(int id, glm::vec2 goal);
+    std::vector<Cell> findPath(int id, glm::vec2 goal, float range, bool diagonal) const;
+    bool planAttackPath(int target, float range);
+    bool canHit(glm::vec2 from, glm::vec2 target, float range) const;
+    bool clearShot(glm::vec2 from, glm::vec2 to) const;
     void strike(int source, int target, float multiplier, Effect effect=Effect::None, float splash=0);
     void resolveTelegraph(const Telegraph& t);
     void telegraph(int owner, Telegraph t);

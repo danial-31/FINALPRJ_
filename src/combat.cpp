@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <queue>
 
 namespace world {
@@ -132,18 +133,49 @@ bool Game::walkablePos(int id,vec2 p) const{
     return true;
 }
 std::vector<Cell> Game::path(int id,Cell destination,bool diagonal) const{
-    if(id<0||id>=int(actors.size())||!walkable(id,destination))return {};
-    Cell start=actors[size_t(id)].cell;if(start==destination||!M().inside(start.x,start.y))return {};
+    return findPath(id,world2(destination),0,diagonal);
+}
+bool Game::canHit(vec2 from,vec2 target,float range) const{
+    return len(target-from)<=range&&clearShot(from,target);
+}
+bool Game::clearShot(vec2 from,vec2 to) const{
+    // Traverse the actual segment through the grid, rather than a ray between cell centres.
+    // The latter can disagree between launch and small projectile steps near an obstacle corner.
+    Cell c=cellOf(from),end=cellOf(to);
+    if(M().opaque(c.x,c.y)||M().opaque(end.x,end.y))return false;
+    const vec2 d=to-from;const int sx=d.x>0?1:-1,sy=d.y>0?1:-1;
+    const float inf=std::numeric_limits<float>::infinity(),s=world::Map::cellSize;
+    const float dx=d.x==0?inf:s/std::abs(d.x),dy=d.y==0?inf:s/std::abs(d.y);
+    float tx=d.x==0?inf:(M().originX+float(c.x+(sx>0))*s-from.x)/d.x;
+    float ty=d.y==0?inf:(M().originZ+float(c.y+(sy>0))*s-from.y)/d.y;
+    while(c!=end){
+        if(std::abs(tx-ty)<.000001f){
+            if(M().opaque(c.x+sx,c.y)||M().opaque(c.x,c.y+sy))return false;
+            c.x+=sx;c.y+=sy;tx+=dx;ty+=dy;
+        }else if(tx<ty){c.x+=sx;tx+=dx;}else{c.y+=sy;ty+=dy;}
+        if(M().opaque(c.x,c.y))return false;
+    }
+    return true;
+}
+std::vector<Cell> Game::findPath(int id,vec2 goal,float range,bool diagonal) const{
+    const Cell destination=cellOf(goal);
+    if(id<0||id>=int(actors.size())||(!range&&!walkable(id,destination)))return {};
+    Cell start=cellOf(actors[size_t(id)].pos);if(!M().inside(start.x,start.y))return {};
     const int w=M().width,count=w*M().height;
     std::vector<float> cost(size_t(count),1e9f);std::vector<int> prev(size_t(count),-1);
     using Node=std::pair<float,int>;std::priority_queue<Node,std::vector<Node>,std::greater<Node>> open;
     auto idx=[w](Cell c){return c.y*w+c.x;};
-    auto h=[&](Cell c){float dx=float(std::abs(c.x-destination.x)),dy=float(std::abs(c.y-destination.y));return dx+dy-.586f*std::min(dx,dy);};
+    auto h=[&](Cell c){
+        if(range>0)return std::max(0.f,len(world2(c)-goal)-range)/world::Map::cellSize*.999f;
+        float dx=float(std::abs(c.x-destination.x)),dy=float(std::abs(c.y-destination.y));return dx+dy-.586f*std::min(dx,dy);};
     cost[size_t(idx(start))]=0;open.push({h(start),idx(start)});
+    int reached=-1;
     static const Cell dirs[]={{1,0},{-1,0},{0,1},{0,-1},{1,1},{-1,1},{1,-1},{-1,-1}};
     while(!open.empty()){
         auto [f,i]=open.top();open.pop();Cell c{i%w,i/w};
-        if(c==destination)break;
+        if(f>cost[size_t(i)]+h(c)+.0001f)continue;
+        const vec2 position=c==start?actors[size_t(id)].pos:world2(c);
+        if(range>0?(walkablePos(id,position)&&canHit(position,goal,range)):c==destination){reached=i;break;}
         for(int k=0;k<(diagonal?8:4);++k){Cell d=dirs[k];Cell n{c.x+d.x,c.y+d.y};
             if(!walkable(id,n))continue;
             if(d.x&&d.y&&(!walkable(id,{c.x+d.x,c.y})||!walkable(id,{c.x,c.y+d.y})))continue;
@@ -152,9 +184,20 @@ std::vector<Cell> Game::path(int id,Cell destination,bool diagonal) const{
             if(nc<cost[size_t(idx(n))]){cost[size_t(idx(n))]=nc;prev[size_t(idx(n))]=i;open.push({nc+h(n),idx(n)});}
         }
     }
-    if(prev[size_t(idx(destination))]<0)return {};
-    std::vector<Cell> out;for(int i=idx(destination);i!=idx(start);i=prev[size_t(i)])out.push_back({i%w,i/w});
+    if(reached<0)return {};
+    std::vector<Cell> out;for(int i=reached;i!=idx(start);i=prev[size_t(i)])out.push_back({i%w,i/w});
     std::reverse(out.begin(),out.end());return out;
+}
+bool Game::planAttackPath(int target,float range){
+    auto& h=actors[0];const vec2 goal=actors[size_t(target)].pos;
+    h.path.clear();h.moving=false;h.repath=.3f;
+    // Keep a direct approach smooth; the update stops it as soon as the skill is in range.
+    if(clearLine(h.pos,goal,0)){planPath(0,goal);return h.moving;}
+    // Search for a reachable firing position, including across water or beside a blocked target cell.
+    const auto cells=findPath(0,goal,range,true);
+    for(Cell c:cells)h.path.push_back(world2(c));
+    if(h.path.empty())return false;
+    h.goal=h.path.back();h.moving=true;return true;
 }
 bool Game::clearLine(vec2 a,vec2 b,int id) const{
     float l=len(b-a);int steps=int(l/.3f)+1;
@@ -200,8 +243,10 @@ void Game::steer(int id,float dt){
     a.facing=std::atan2(dir.x,dir.y);
 }
 void Game::separate(){
-    for(size_t i=0;i<actors.size();++i)for(size_t j=i+1;j<actors.size();++j){
-        auto& a=actors[i];auto& b=actors[j];if(!a.alive()||!b.alive())continue;
+    for(size_t i=0;i<actors.size();++i){
+        auto& a=actors[i];if(!a.alive())continue;
+        for(size_t j=i+1;j<actors.size();++j){
+        auto& b=actors[j];if(!b.alive())continue;
         vec2 d=b.pos-a.pos;float l=len(d),minD=a.radius+b.radius;
         if(l>=minD||l<1e-4f){if(l<1e-4f)b.pos.x+=.01f;continue;}
         vec2 push=d/l*(minD-l);
@@ -209,7 +254,7 @@ void Game::separate(){
         float wa=fixedA?0:fixedB?1:.5f,wb=fixedB?0:fixedA?1:.5f;
         vec2 na=a.pos-push*wa,nb=b.pos+push*wb;
         if(walkablePos(int(i),na))a.pos=na;if(walkablePos(int(j),nb))b.pos=nb;
-    }
+    }}
 }
 // ------------------------------------------------------------------ damage
 bool Game::shielded(int id) const{
@@ -247,6 +292,7 @@ int Game::attackDamage(int source,int target,float multiplier) const{
 }
 void Game::damage(int id,int amount,int source,bool){
     auto& a=actors[size_t(id)];if(!a.alive()||amount<=0)return;
+    if(shielded(id)){if(source==0&&!a.aggro)engage(id);return;}
     a.hp=std::max(0,a.hp-amount);a.hitFlash=.18f;
     events.push_back({Event::Hit,source,id,amount,a.cell,""});
     if(id>0&&!a.aggro&&source==0)engage(id);
@@ -262,7 +308,7 @@ void Game::damage(int id,int amount,int source,bool){
         if(!any){message("Последний пилон рухнул — щит Хранителя пал!");events.push_back({Event::PhaseTwo,id,0,0,a.cell,"Щит разрушен"});}}
 }
 void Game::applyEffect(int id,Effect e,int source,float seconds){
-    auto& v=actors[size_t(id)];if(!v.alive()||e==Effect::None)return;
+    auto& v=actors[size_t(id)];if(!v.alive()||e==Effect::None||shielded(id))return;
     bool hero=source==0;bool rogueT1=hero&&heroClass==Class::Rogue&&(actors[0].talents&T1);
     switch(e){
     case Effect::Poison:v.poison=std::max(v.poison,seconds>0?seconds:(rogueT1?6.f:4.f));v.poisonDps=rogueT1?7:(hero?5:4);break;
@@ -323,7 +369,7 @@ bool Game::attackUnit(int target){
 void Game::stop(){if(actors.empty())return;actors[0].target=-1;actors[0].path.clear();actors[0].moving=false;pendingSlot=-1;}
 bool Game::abilityUnlocked(int slot) const{return actors[0].level>=ability(heroClass,slot).level;}
 Preview Game::castPreview(int slot,int target,vec2 point) const{
-    Preview p;if(actors.empty())return p;const auto& h=actors[0];const auto& ab=ability(heroClass,slot);
+    Preview p;if(actors.empty()||slot<0||slot>=4)return p;const auto& h=actors[0];const auto& ab=ability(heroClass,slot);
     if(!h.alive()){p.reason="Герой пал";return p;}
     if(!abilityUnlocked(slot)){p.reason="Откроется на уровне "+std::to_string(ab.level);return p;}
     float cd=h.cd[slot];
@@ -341,7 +387,12 @@ bool Game::cast(int slot,int target,vec2 point){
     auto& h=actors[0];const auto& ab=ability(heroClass,slot);
     vec2 at=ab.target==Target::Unit?actors[size_t(target)].pos:point;
     float dist=len(at-h.pos);
-    if(ab.target!=Target::Self&&dist>ab.range+(ab.target==Target::Unit?actors[size_t(target)].radius:0.f)){
+    if(ab.target==Target::Unit&&!canHit(h.pos,at,ab.range+actors[size_t(target)].radius)){
+        pendingSlot=slot;pendingTarget=target;pendingPoint=point;
+        if(planAttackPath(target,ab.range+actors[size_t(target)].radius))return true;
+        pendingSlot=-1;message("Нет доступной позиции для навыка");return false;
+    }
+    if(ab.target==Target::Point&&dist>ab.range){
         if(ab.target==Target::Point&&(slot==1||slot==2)){at=h.pos+(at-h.pos)/dist*ab.range;point=at;}   // blinks go as far as they can
         else{pendingSlot=slot;pendingTarget=target;pendingPoint=point;planPath(0,at);return true;}
     }
@@ -440,7 +491,7 @@ void Game::enemyAi(int id,float dt){
     if(!h.alive())return;
     if(a.boss){bossAi(id,dt);return;}
     float range=attackRange(a);
-    bool sight=lineOfSight(a.cell,h.cell);
+    bool sight=clearShot(a.pos,h.pos);
     if(dh<=range+h.radius&&sight){
         a.path.clear();a.moving=false;a.facing=std::atan2(h.pos.x-a.pos.x,h.pos.y-a.pos.y);
         if(a.attackTimer<=0){
@@ -468,7 +519,7 @@ void Game::bossAi(int id,float dt){
     bool winding=false;for(const auto& t:telegraphs)winding|=t.owner==id&&!t.hazard;
     auto chaseAndHit=[&](float range){
         if(winding)return;
-        if(dh<=range+h.radius&&lineOfSight(b.cell,h.cell)){b.path.clear();b.moving=false;b.facing=std::atan2(h.pos.x-b.pos.x,h.pos.y-b.pos.y);
+        if(dh<=range+h.radius&&clearShot(b.pos,h.pos)){b.path.clear();b.moving=false;b.facing=std::atan2(h.pos.x-b.pos.x,h.pos.y-b.pos.y);
             if(b.attackTimer<=0){b.attackTimer=attackInterval(b);b.swing=.3f;strike(id,0,1.f);}}
         else{b.repath-=dt;if(b.repath<=0){b.repath=.4f;planPath(id,h.pos);}}
     };
@@ -478,7 +529,7 @@ void Game::bossAi(int id,float dt){
     case Kind::Matriarch:{
         if(!b.halfTriggered&&b.hp*2<=b.maxHp){b.halfTriggered=true;events.push_back({Event::PhaseTwo,id,0,0,b.cell,"Матка в ярости"});
             for(int k=0;k<4;++k){Telegraph t;t.shape=0;t.center=h.pos+vec2(randomf()-.5f,randomf()-.5f)*7.f;t.radius=1.7f;t.total=1.5f;t.hazard=true;t.label="Ядовитый туман";telegraph(id,t);}}
-        if(!winding&&b.timers[0]<=0&&dh<9.f&&lineOfSight(b.cell,h.cell)){b.timers[0]=7.f;projectiles.push_back({b.pos,id,0,10.f,6,Effect::Web,0,false});message("Матка выстреливает паутиной!");}
+        if(!winding&&b.timers[0]<=0&&dh<9.f&&clearShot(b.pos,h.pos)){b.timers[0]=7.f;projectiles.push_back({b.pos,id,0,10.f,6,Effect::Web,0,false});message("Матка выстреливает паутиной!");}
         if(b.timers[1]<=0&&aliveSummons(id)<3){b.timers[1]=10.f;vec2 at=b.pos;summon(Kind::Spiderling,at,id);summon(Kind::Spiderling,at,id);return;}
         if(!winding&&b.timers[2]<=0&&dh<8.f){b.timers[2]=6.f;stopForCast();Telegraph t;t.shape=0;t.center=h.pos;t.radius=1.9f;t.total=1.4f;t.damage=24;t.effect=Effect::Poison;t.label="Ядовитый плевок";telegraph(id,t);return;}
         chaseAndHit(2.4f);break;}
@@ -505,7 +556,7 @@ void Game::bossAi(int id,float dt){
         if(!shield&&!winding&&b.timers[2]<=0){b.timers[2]=9.f;stopForCast();
             for(int k=0;k<2;++k){Telegraph t;t.shape=1;t.dir=k?vec2(1,0):vec2(0,1);t.center=b.pos;t.length=18.f;t.width=2.f;t.total=1.6f;t.damage=40;t.heavy=k==0;t.label="Крест погибели";telegraph(id,t);}return;}
         if(shield){ // stays among its pylons and shoots
-            if(dh<=7.f+h.radius&&lineOfSight(b.cell,h.cell)&&b.attackTimer<=0){b.attackTimer=attackInterval(b);b.swing=.3f;strike(id,0,1.f);}
+            if(dh<=7.f+h.radius&&clearShot(b.pos,h.pos)&&b.attackTimer<=0){b.attackTimer=attackInterval(b);b.swing=.3f;strike(id,0,1.f);}
             if(len(b.pos-b.homePos)>2.f&&!b.moving)planPath(id,b.homePos);
         }else chaseAndHit(7.f);
         break;}
@@ -538,18 +589,21 @@ void Game::updateActor(int id,float dt){
             bool valid=ab.target!=Target::Unit||(pendingTarget>0&&pendingTarget<int(actors.size())&&actors[size_t(pendingTarget)].alive());
             if(!valid)pendingSlot=-1;
             else{vec2 at=ab.target==Target::Unit?actors[size_t(pendingTarget)].pos:pendingPoint;
-                if(len(at-a.pos)<=ab.range+(ab.target==Target::Unit?actors[size_t(pendingTarget)].radius:0.f)){int s=pendingSlot;pendingSlot=-1;cast(s,pendingTarget,pendingPoint);}
-                else{a.repath-=dt;if(a.repath<=0){a.repath=.3f;planPath(0,at);}}}
+                const float range=ab.range+(ab.target==Target::Unit?actors[size_t(pendingTarget)].radius:0.f);
+                if(ab.target==Target::Unit?canHit(a.pos,at,range):len(at-a.pos)<=range){int s=pendingSlot;pendingSlot=-1;cast(s,pendingTarget,pendingPoint);}
+                else{a.repath-=dt;if(a.repath<=0){a.repath=.3f;
+                    if(ab.target==Target::Unit){if(!planAttackPath(pendingTarget,range)){pendingSlot=-1;message("Нет доступной позиции для навыка");}}
+                    else{planPath(0,at);if(!a.moving)pendingSlot=-1;}}}}
         }else if(a.target>0){
             auto& t=actors[size_t(a.target)];
             if(!t.alive()){a.target=-1;}
             else{float d=len(t.pos-a.pos)-t.radius;
-                if(d<=attackRange(a)&&lineOfSight(a.cell,t.cell)){a.path.clear();a.moving=false;a.facing=std::atan2(t.pos.x-a.pos.x,t.pos.y-a.pos.y);
+                if(d<=attackRange(a)&&clearShot(a.pos,t.pos)){a.path.clear();a.moving=false;a.facing=std::atan2(t.pos.x-a.pos.x,t.pos.y-a.pos.y);
                     if(a.attackTimer<=0){a.attackTimer=attackInterval(a);a.swing=.25f;
                         float mult=a.empowered>0?2.f:1.f;a.empowered=0;
                         float splash=(heroClass==Class::Warrior&&(a.talents&T2))?1.8f:0.f;
                         strike(0,a.target,mult,Effect::None,splash);}}
-                else{a.repath-=dt;if(a.repath<=0||!a.moving){a.repath=.3f;planPath(0,t.pos);}}}
+                else{a.repath-=dt;if(a.repath<=0){a.repath=.3f;planPath(0,t.pos);}}}
         }
     }else enemyAi(id,dt);
     steer(id,dt);
@@ -558,7 +612,7 @@ void Game::update(float dt){
     if(actors.empty())return;
     time+=dt;itemCooldown=std::max(0.f,itemCooldown-dt);
     if(phase==Phase::Defeat)return;
-    for(size_t i=0;i<actors.size();++i)updateActor(int(i),dt);
+    for(size_t i=0;i<actors.size();++i){updateActor(int(i),dt);if(phase==Phase::Defeat)return;}
     separate();
     // cells, traps and hero steps
     for(size_t i=0;i<actors.size();++i){auto& a=actors[i];if(!a.alive())continue;
@@ -566,25 +620,36 @@ void Game::update(float dt){
         if(c!=a.cell){a.cell=c;
             if(!a.spirit&&M().at(c.x,c.y)==world::Tile::Trap){M().set(c.x,c.y,world::Tile::Floor);int amount=i==0?12:8;
                 message(a.name+": ловушка! -"+std::to_string(amount));events.push_back({Event::Trap,-1,int(i),amount,c,"Ловушка"});
-                if(i==0&&phase==Phase::Explore)a.hp=std::max(1,a.hp-amount);else damage(int(i),amount);}
+                if(i==0&&phase==Phase::Explore)a.hp=std::max(1,a.hp-amount);else damage(int(i),amount);
+                if(phase==Phase::Defeat)return;}
             if(i==0)events.push_back({Event::Step,0,0,0,c,""});}}
     // projectiles
     for(size_t k=0;k<projectiles.size();){
-        auto& p=projectiles[k];bool done=false;
-        if(p.target<0||p.target>=int(actors.size())||!actors[size_t(p.target)].alive())done=true;
-        else{vec2 d=actors[size_t(p.target)].pos-p.pos;float l=len(d),step=p.speed*dt;
-            if(l<=step+.3f){int tgt=p.target;damage(tgt,p.damage,p.source);
-                if(p.effect!=Effect::None)applyEffect(tgt,p.effect,p.source);
-                if(p.splash>0)for(size_t i=1;i<actors.size();++i)if(int(i)!=tgt&&actors[i].alive()&&len(actors[i].pos-actors[size_t(tgt)].pos)<=p.splash){damage(int(i),std::max(1,p.damage/2),p.source);applyEffect(int(i),p.effect,p.source);}
-                done=true;}
-            else p.pos+=d/l*step;}
-        if(done)projectiles.erase(projectiles.begin()+long(k));else ++k;
+        // Damage callbacks can clear every projectile on defeat. Resolve a detached copy.
+        const Projectile p=projectiles[k];
+        if(p.target<0||p.target>=int(actors.size())||!actors[size_t(p.target)].alive()){
+            projectiles.erase(projectiles.begin()+long(k));continue;}
+        const vec2 target=actors[size_t(p.target)].pos,d=target-p.pos;
+        const float l=len(d),step=p.speed*dt;
+        const bool hit=l<=step+.3f;
+        const vec2 next=hit?target:p.pos+d/l*step;
+        // Sweep every crossed cell, not just the endpoint, so a fast arrow cannot tunnel through a wall.
+        if(!clearShot(p.pos,next)){
+            projectiles.erase(projectiles.begin()+long(k));continue;}
+        if(!hit){projectiles[k].pos=next;++k;continue;}
+        projectiles.erase(projectiles.begin()+long(k));
+        damage(p.target,p.damage,p.source);
+        if(phase==Phase::Defeat)return;
+        applyEffect(p.target,p.effect,p.source);
+        if(p.splash>0)for(size_t i=1;i<actors.size();++i)
+            if(int(i)!=p.target&&actors[i].alive()&&len(actors[i].pos-target)<=p.splash&&clearShot(target,actors[i].pos)){
+                damage(int(i),std::max(1,p.damage/2),p.source);applyEffect(int(i),p.effect,p.source);}
     }
     // marked attacks
     for(auto& t:telegraphs)t.time-=dt;
     std::vector<Telegraph> fire;
     for(size_t k=0;k<telegraphs.size();){if(telegraphs[k].time<=0){fire.push_back(telegraphs[k]);telegraphs.erase(telegraphs.begin()+long(k));}else ++k;}
-    for(const auto& t:fire)resolveTelegraph(t);
+    for(const auto& t:fire){resolveTelegraph(t);if(phase==Phase::Defeat)return;}
     for(auto& hz:hazards)hz.time-=dt;
     hazards.erase(std::remove_if(hazards.begin(),hazards.end(),[](const Hazard& h){return h.time<=0;}),hazards.end());
     refreshPhase();

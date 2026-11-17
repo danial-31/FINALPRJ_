@@ -33,17 +33,21 @@ std::string classLine(combat::Class c){
 
 void App::drawTechniqueBadge(){
     const bool compact=screen!=Screen::Game||win!=Window::None;
+    const bool shadowsOn=settings.technique&&settings.shadowQuality>0;
     float w=compact?218.f:308.f,x=ui.width-w-14,y=12;
-    ui.gradient(x,y,w,compact?29.f:86.f,{.105f,.12f,.122f,.95f},{.048f,.056f,.06f,.91f});
-    ui.frame(x,y,w,compact?29.f:86.f,ui::bevel);
-    ui.quad(x,y,2,compact?29.f:86.f,settings.technique?ui::mint:ui::red);
-    ui.text(x+12,y+5,std::string("T  ·  Мягкие тени PCSS  ")+(settings.technique?"Вкл":"Выкл"),15,settings.technique?ui::mint:ui::red);
+    ui.gradient(x,y,w,compact?29.f:108.f,{.105f,.12f,.122f,.95f},{.048f,.056f,.06f,.91f});
+    ui.frame(x,y,w,compact?29.f:108.f,ui::bevel);
+    ui.quad(x,y,2,compact?29.f:108.f,shadowsOn?ui::mint:ui::red);
+    ui.text(x+12,y+5,std::string("T  ·  Мягкие тени PCSS  ")+(shadowsOn?"Вкл":"Выкл"),15,shadowsOn?ui::mint:ui::red);
     if(compact)return;
     std::string line=(fps>0?std::to_string(int(fps))+" FPS   ·   ":"")+(settings.perspective||freeCamera?std::string("Перспектива"):std::string("Ортография"))+(freeCamera?"  ·  F4":"");
     ui.text(x+12,y+26,line,14,ui::text);
     int deg=int(std::fmod(lightAngle*57.2958f+3600.f,360.f));
     ui.text(x+12,y+44,"[ ]  Свет "+std::to_string(deg)+"°     P  Анимация "+(animPaused?"на паузе":"включена"),13,ui::muted);
     ui.text(x+12,y+63,team+" · "+topic,12,ui::muted);
+    std::string gpu=gpuName;
+    const auto suffix=gpu.find("/PCIe");if(suffix!=std::string::npos)gpu.resize(suffix);
+    ui.text(x+12,y+83,"GPU: "+gpu,11,ui::muted);
 }
 
 void App::drawMenu(){

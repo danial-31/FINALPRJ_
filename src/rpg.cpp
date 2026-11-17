@@ -6,6 +6,10 @@
 #include <sstream>
 #include <cstdio>
 #include <cstdlib>
+#include <cmath>
+#include <iomanip>
+#include <limits>
+#include <stdexcept>
 
 namespace rpg {
 using combat::Kind;
@@ -485,14 +489,13 @@ void Campaign::talk(const std::string& npc){
         else if(s==10){
             say("Ты вернулся! Скверна ушла из долины, и наши люди возвращаются домой.");
             say("Серый Брод в долгу перед тобой. Пусть этот дом будет и твоим, странник.");
-            setStage("main",11);requests.push_back({Request::Credits,""});
         }else say("Долина спокойна. Говорят, в горах ещё остались нетронутые тайники…");
-        option("До встречи","close");
+        option(s==10?"Завершить историю":"До встречи",s==10?"finish_campaign":"close");
     }else if(npc=="merchant"){
         dialog.speaker="Торговка Мира";
         if(!flags.count("got_supplies")){
             say("Ты — тот странник? Староста просил помочь. Держи два зелья и противоядие — за счёт деревни.");
-            say("Открой сумку клавишей I, чтобы осмотреть вещи. Зелья можно пить и в бою — это стоит очков действия.");
+            say("Открой сумку клавишей I, чтобы осмотреть вещи. Зелья можно пить и в бою — между применениями есть короткая перезарядка.");
             flags.insert("got_supplies");addItem("potion",2);addItem("antidote",1);advanceMain();
         }else say(s>=11?"Праздник в деревне — и торговля идёт! Что возьмёшь?":"Зелья, броня, обереги. Продам и куплю — без обмана.");
         option("Торговать","shop:merchant");option("Уйти","close");
@@ -539,6 +542,9 @@ void Campaign::dialogAction(const std::string& action){
     if(action.rfind("shop:",0)==0)requests.push_back({Request::Shop,action.substr(5)});
     else if(action=="craft")requests.push_back({Request::Craft,""});
     else if(action=="smith")requests.push_back({Request::Smith,""});
+    else if(action=="finish_campaign"&&stage("main")==10){
+        setStage("main",11);autosavePending=true;requests.push_back({Request::Credits,""});
+    }
 }
 void Campaign::setStage(const std::string& q,int s){
     int before=stage(q);quests[q]=s;
@@ -722,7 +728,7 @@ bool Campaign::learnTalent(int tier,std::string& reason){
 }
 void Campaign::chooseReward(int index){
     if(index<0||index>=int(rewardChoices.size()))return;
-    std::string id=rewardChoices[size_t(index)];flags.insert("reward_spider");flags.insert("unique:"+id);addItem(id);rewardChoices.clear();
+    std::string id=rewardChoices[size_t(index)];flags.insert("reward_spider");flags.insert("unique:"+id);addItem(id);rewardChoices.clear();autosavePending=true;
 }
 
 // ------------------------------------------------------------------ shrines and defeat
@@ -771,11 +777,13 @@ static std::string nowText(long long stamp){
 }
 bool Campaign::save(const fs::path& path,std::string& error) const{
     if(game.inBattle()){error="Нельзя сохраняться во время боя";return false;}
+    if(game.actors.empty()||!hero().alive()){error="Нельзя сохраняться после поражения";return false;}
     std::ostringstream o;const auto& h=hero();
     long long stamp=std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
     o<<"OSSUARY-SAVE 1\n";
     o<<"stamp="<<stamp<<"\nclass="<<int(heroClass)<<"\nzone="<<zoneId<<"\ncell="<<h.cell.x<<","<<h.cell.y<<"\n";
     o<<"level="<<h.level<<"\nxp="<<h.xp<<"\npoints="<<h.skillPoints<<"\nmaxhp="<<h.maxHp-itemHp<<"\nhp="<<h.hp<<"\npower="<<h.power<<"\narmor="<<h.armor<<"\ntalents="<<h.talents<<"\n";
+    o<<"mana="<<std::setprecision(std::numeric_limits<float>::max_digits10)<<h.mana<<"\n";
     o<<"gold="<<gold<<"\nshrine="<<lastShrine<<"\nplaytime="<<int(playTime)<<"\n";
     for(int i=0;i<3;++i)if(!equip[i].id.empty())o<<"equip="<<i<<","<<equip[i].id<<","<<equip[i].upgrade<<"\n";
     for(const auto& s:inventory)o<<"item="<<s.id<<","<<s.count<<","<<s.upgrade<<"\n";
@@ -794,9 +802,20 @@ bool Campaign::save(const fs::path& path,std::string& error) const{
     return true;
 }
 static std::vector<std::string> split(const std::string& s,char c){std::vector<std::string> out;std::stringstream ss(s);std::string p;while(std::getline(ss,p,c))out.push_back(p);return out;}
+static int savedInt(const std::string& text,int low,int high){
+    size_t used=0;int value=std::stoi(text,&used);
+    if(used!=text.size()||value<low||value>high)throw std::invalid_argument("save integer");
+    return value;
+}
+static double savedReal(const std::string& text,double low,double high){
+    size_t used=0;double value=std::stod(text,&used);
+    if(used!=text.size()||!std::isfinite(value)||value<low||value>high)throw std::invalid_argument("save number");
+    return value;
+}
 bool Campaign::load(const fs::path& path,std::string& error){
     std::ifstream in(path,std::ios::binary);if(!in){error="Файл сохранения не найден";return false;}
-    std::string line;std::getline(in,line);if(line.rfind("OSSUARY-SAVE 1",0)!=0){error="Неизвестный формат сохранения";return false;}
+    std::string line;std::getline(in,line);if(!line.empty()&&line.back()=='\r')line.pop_back();
+    if(line!="OSSUARY-SAVE 1"){error="Неизвестный формат сохранения";return false;}
     Campaign c;c.started=true;std::map<std::string,std::string> kv;bool complete=false;
     std::vector<Stack> inv;Stack eq[3];std::set<std::string> fl,ga;std::map<std::string,int> qs;std::vector<std::string> ns;
     try{
@@ -804,31 +823,57 @@ bool Campaign::load(const fs::path& path,std::string& error){
             if(!line.empty()&&line.back()=='\r')line.pop_back();
             auto eqPos=line.find('=');if(eqPos==std::string::npos)continue;
             std::string k=line.substr(0,eqPos),v=line.substr(eqPos+1);
-            if(k=="equip"){auto p=split(v,',');if(p.size()==3&&item(p[1]))eq[std::stoi(p[0])%3]={p[1],1,std::clamp(std::stoi(p[2]),0,maxUpgrade)};}
-            else if(k=="item"){auto p=split(v,',');if(p.size()==3&&item(p[0]))inv.push_back({p[0],std::max(1,std::stoi(p[1])),std::clamp(std::stoi(p[2]),0,maxUpgrade)});}
+            if(k=="equip"){
+                auto p=split(v,',');if(p.size()!=3||!item(p[1]))throw std::invalid_argument("save equipment");
+                int slot=savedInt(p[0],0,2);
+                eq[slot]={p[1],1,savedInt(p[2],0,maxUpgrade)};
+            }
+            else if(k=="item"){
+                auto p=split(v,',');if(p.size()!=3||!item(p[0]))throw std::invalid_argument("save item");
+                inv.push_back({p[0],savedInt(p[1],1,1000000),savedInt(p[2],0,maxUpgrade)});
+            }
             else if(k=="flag")fl.insert(v);
             else if(k=="gathered")ga.insert(v);
-            else if(k=="quest"){auto p=split(v,',');if(p.size()==2)qs[p[0]]=std::stoi(p[1]);}
+            else if(k=="quest"){auto p=split(v,',');if(p.size()!=2)throw std::invalid_argument("save quest");qs[p[0]]=savedInt(p[1],0,11);}
             else if(k=="note")ns.push_back(v);
-            else if(k=="end")complete=true;
+            else if(k=="end")complete=v=="1";
             else kv[k]=v;
         }
         if(!complete){error="Сохранение повреждено (файл обрезан)";return false;}
-        int cls=std::stoi(kv.at("class"));if(cls<0||cls>2){error="Неверный класс героя";return false;}
+        int cls=savedInt(kv.at("class"),0,2);
         if(!zoneDef(kv.at("zone"))){error="Неизвестная зона в сохранении";return false;}
         c.heroClass=combat::Class(cls);
         combat::Actor h=combat::Game::makeHero(c.heroClass);c.game.heroClass=c.heroClass;
-        h.level=std::stoi(kv.at("level"));h.xp=std::stoi(kv.at("xp"));h.skillPoints=std::stoi(kv.at("points"));
-        h.maxHp=std::stoi(kv.at("maxhp"));h.hp=std::stoi(kv.at("hp"));h.power=std::stoi(kv.at("power"));h.armor=std::stoi(kv.at("armor"));
-        h.talents=std::stoi(kv.at("talents"))&7;
+        // Bound loaded values before they participate in arithmetic or index arrays.
+        h.level=savedInt(kv.at("level"),1,10000);h.xp=savedInt(kv.at("xp"),0,h.level*100-1);h.skillPoints=savedInt(kv.at("points"),0,1000000);
+        h.maxHp=savedInt(kv.at("maxhp"),1,1000000);h.hp=savedInt(kv.at("hp"),1,1000000);
+        h.power=savedInt(kv.at("power"),0,1000000);h.armor=savedInt(kv.at("armor"),0,1000000);
+        h.talents=savedInt(kv.at("talents"),0,7);
+        h.maxMana+=8.f*float(h.level-1);
+        h.mana=kv.count("mana")?float(savedReal(kv.at("mana"),0,h.maxMana)):h.maxMana;
         c.game.actors={h};
-        c.gold=std::stoi(kv.at("gold"));c.lastShrine=kv.at("shrine");c.playTime=std::stod(kv["playtime"].empty()?"0":kv["playtime"]);
+        c.gold=savedInt(kv.at("gold"),0,1000000000);c.lastShrine=kv.at("shrine");
+        c.playTime=kv.count("playtime")?savedReal(kv.at("playtime"),0,1000000000):0;
         c.inventory=inv;for(int i=0;i<3;++i)c.equip[i]=eq[i];c.flags=fl;c.gathered=ga;c.quests=qs;c.notes=ns;
         if(c.equip[0].id.empty()){const char* weapon[]={"rusty_sword","worn_daggers","apprentice_staff"};c.equip[0]={weapon[cls],1,0};}
+        for(int i=0;i<3;++i)if(!c.equip[i].id.empty()){
+            const auto& def=*item(c.equip[i].id);
+            ItemType type=i==0?ItemType::Weapon:i==1?ItemType::Armor:ItemType::Talisman;
+            if(def.type!=type||!canEquip(def,c.heroClass))throw std::invalid_argument("save equipment slot");
+        }
         c.applyEquipment();
-        c.hero().hp=std::clamp(h.hp,1,c.hero().maxHp);
+        if(h.hp>c.hero().maxHp)throw std::invalid_argument("save health");
+        c.hero().hp=h.hp;
         auto cell=split(kv.at("cell"),',');
-        c.enterZone(kv.at("zone"),'\0',{std::stoi(cell.at(0)),std::stoi(cell.at(1))});
+        if(cell.size()!=2)throw std::invalid_argument("save cell");
+        auto savedMap=buildMap(*zoneDef(kv.at("zone")));
+        Cell at{savedInt(cell[0],0,savedMap.width-1),savedInt(cell[1],0,savedMap.height-1)};
+        c.enterZone(kv.at("zone"),'\0',at);
+        // The boss/reward flags are the durable transaction, including saves from older builds.
+        if(c.flags.count("boss_matriarch")&&!c.flags.count("reward_spider")){
+            c.rewardChoices={"chitin_blade","queen_fangs","silkweaver_staff"};
+            c.requests.push_back({Request::RewardChoice,""});
+        }
     }catch(const std::exception&){error="Сохранение повреждено (неверные данные)";return false;}
     *this=std::move(c);
     // Re-point the combat map to this object's map after the move.

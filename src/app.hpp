@@ -91,7 +91,8 @@ private:
     // window-specific state
     int selected=-1, dialogLine=0, slotConfirm=-1, settingsResolution=-1;
     int inventoryPage=0;
-    std::string shopNpc, status, team="Daniyal Tapishev", topic="Тема уточняется (см. assets/team.txt)";
+    std::string shopNpc, status, team="Daniyal Tapishev", topic="Мягкие тени PCSS";
+    std::string gpuName;
     std::string defeatMessage;
     int lastToastCount=0;
     std::uint32_t lastEntityHash=0;
@@ -99,6 +100,7 @@ private:
 
     // core
     void frameStep(float dt);
+    int runBenchmark();
     bool key(int k);
     bool held(int k) const;
     void startNewGame(combat::Class c);
