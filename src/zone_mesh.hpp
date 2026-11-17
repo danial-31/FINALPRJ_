@@ -22,7 +22,9 @@ struct ZoneVisuals {
 // Static zone geometry; rebuilt when doors open, chests empty, etc.
 void buildZoneVisuals(const rpg::Campaign& c, ZoneVisuals& out);
 // Animated figures (enemies, NPCs) and floor markers; rebuilt every frame.
-void buildEnemy(Mesh& m, const combat::Actor& a, glm::vec3 p, float yaw, float time, bool active);
+inline constexpr float enemyRemainsSeconds=3.25f;
+void buildEnemy(Mesh& m, const combat::Actor& a, glm::vec3 p, float yaw, float phase, float moveWeight,
+                float deathSeconds=-1.f,float hitSeconds=1.f);
 void buildNpc(Mesh& m, const std::string& id, glm::vec3 p, float yaw, float time);
 void buildLootBag(Mesh& m, glm::vec3 p, float time);
 void floorTile(Mesh& m, const world::Map& map, world::Cell cell, glm::vec3 color, float thickness, float lift=.06f);

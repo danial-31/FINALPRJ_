@@ -103,7 +103,8 @@ static void spendPoints(Campaign& c){std::string why;for(int t=0;t<3;++t)c.learn
 
 static void playthrough(combat::Class cls){
     Campaign c;c.newGame(cls);int potions=0;std::string why;
-    check(c.zoneId=="village","starts in the village");
+    check(c.zoneId=="road"&&c.zone().surface&&c.map.glyph(c.hero().cell.x,c.hero().cell.y)=='[',"starts on the forest road by the village");
+    travelTo(c,"to_village");
     use(c,"elder");check(c.stage("main")==1,"elder starts the story");
     use(c,"merchant");use(c,"shrine_village");check(c.stage("main")==2,"supplies + shrine");
     use(c,"smith");check(c.stage("cargo")==1,"smith side quest");
@@ -182,7 +183,7 @@ int main(){
         Campaign d;check(d.load(dir/"slot.sav",why),"load: "+why);
         check(d.gold==123&&d.flags.count("boss_matriarch")&&d.stage("main")==4&&d.count("ore")==5&&d.equip[1].id=="chainmail","round trip");
         check(&d.game.M()==&d.map,"map pointer survives load");
-        auto info=Campaign::inspect(dir/"slot.sav");check(info.valid&&info.level==1&&info.zoneName=="Серый Брод","slot info");
+        auto info=Campaign::inspect(dir/"slot.sav");check(info.valid&&info.level==1&&info.zoneName=="Старая дорога","slot info");
         {std::ofstream bad(dir/"bad.sav");bad<<"OSSUARY-SAVE 1\nlevel=2\n";}
         Campaign e;check(!e.load(dir/"bad.sav",why),"truncated save rejected");
         // death rules

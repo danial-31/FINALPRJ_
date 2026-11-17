@@ -376,13 +376,112 @@ void buildProps(Mesh& m, std::vector<Torch>& torches)
     }
 }
 
-void buildAnimatedHero(Mesh& m, float time, float gait, float speed, float cast)
+namespace {
+using Ring = std::array<float,4>; // height, width radius, depth radius, depth offset
+void garment(Mesh& m,std::initializer_list<Ring> rings,vec3 color,float material,int sides=10)
 {
-    speed=std::clamp(speed,0.0f,1.0f); cast=std::clamp(cast,0.0f,1.0f);
-    const auto pose=heroAnimation::sample(time,gait,speed);
-    const vec3 steel{.32f,.38f,.40f}, leather{.13f,.09f,.065f};
+    auto point=[&](const Ring& r,float angle){
+        return vec3{r[1]*std::sin(angle),r[0],r[3]-r[2]*std::cos(angle)};
+    };
+    for(auto row=rings.begin()+1;row!=rings.end();++row)for(int i=0;i<sides;++i) {
+        const float a=(float(i)-.5f)*2*pi/float(sides),b=(float(i)+.5f)*2*pi/float(sides);
+        m.quad(point(row[-1],a),point(*row,a),point(*row,b),point(row[-1],b),
+               color*(.95f+.05f*std::cos(a+.45f)),material);
+    }
+}
+void hood(Mesh& m,bool tall,float breath,vec3 fabric,vec3 trim)
+{
+    // An open cowl around an inset, shadowed face, with a contrasting cut edge.
+    const vec3 skin{.58f,.38f,.27f};
+    m.sphere({0,1.78f+breath,-.059f},{.142f,.165f,.125f},skin,5,10,7);
+    if(tall){
+        m.sphere({0,1.787f+breath,-.178f},{.031f,.048f,.036f},skin*1.08f,5,7,5);
+        m.sphere({0,1.91f+breath,-.210f},{.029f,.036f,.012f},brass,4,8,4);
+    }else m.sphere({0,1.76f+breath,-.145f},{.116f,.071f,.05f},fabric*.60f,5,9,5);
+    const vec3 apex{0,(tall?2.075f:2.03f)+breath,tall?.20f:.085f};
+    const vec3 back{0,1.76f+breath,.196f};
+    for(float side:{-1.f,1.f}){
+        m.beam({side*.016f,1.815f+breath,-.170f},{side*.083f,1.824f+breath,-.150f},
+               .009f,{.108f,.081f,.069f},5,5);
+        const vec3 top{0,1.92f+breath,-.206f};
+        const vec3 brow{.11f*side,1.895f+breath,-.187f};
+        const vec3 cheek{.151f*side,1.78f+breath,-.151f};
+        const vec3 throat{.119f*side,1.61f+breath,-.128f};
+        const vec3 temple{.207f*side,1.84f+breath,.036f},hem{.196f*side,1.60f+breath,.047f};
+        m.triangle(top,brow,apex,fabric*1.15f,5);m.triangle(brow,temple,apex,fabric,5);
+        m.triangle(brow,cheek,temple,fabric*.94f,5);m.quad(cheek,throat,hem,temple,fabric*.82f,5);
+        m.triangle(temple,back,apex,fabric*.94f,5);m.triangle(temple,hem,back,fabric*.80f,5);
+        m.triangle(hem,{0,1.60f+breath,.15f},back,fabric*.76f,5);
+        m.beam(top,brow,.011f,trim,5,5);m.beam(brow,cheek,.012f,trim,5,5);
+        if(tall){
+            vec3 hemTip{side*.224f,1.33f+breath,-.072f};
+            m.triangle(cheek,hem,hemTip,fabric*.88f,5);
+            m.triangle(cheek,hemTip,throat,fabric*1.07f,5);
+            m.beam(cheek,hemTip,.009f,trim,5,5);
+        }
+    }
+}
+void blade(Mesh& m,bool dagger){
+    const float length=dagger?.46f:.76f,width=dagger?.061f:.080f;
+    const vec3 edge{.62f,.70f,.72f}, trim{.67f,.45f,.21f};
+    m.beam({0,.085f,0},{0,-.11f,0},.032f,wood*.8f,2,7);
+    m.sphere({0,.09f,0},{.04f,.048f,.04f},trim,4,7,4);
+    for(float s:{-1.f,1.f}){
+        m.beam({0,-.10f,0},{s*(dagger?.083f:.138f),-.076f,-.026f},.021f,trim,4,6);
+        vec3 heel{s*width*.46f,-.116f,-.012f},belly{s*width,-.24f,-.064f};
+        vec3 tip{dagger?.035f:0,-length,-length*.53f};
+        for(float face:{-1.f,1.f}){
+            vec3 ridge{0,-.21f,-.052f+.029f*face};
+            m.triangle({0,-.112f,0},heel,ridge,edge*(face*s>0?1.12f:.72f),3);
+            m.triangle(heel,belly,ridge,edge*(face*s>0?1.03f:.69f),3);
+            m.triangle(ridge,belly,tip,edge*(face*s>0?1.16f:.76f),3);
+        }
+    }
+}
+void staff(Mesh& m){
+    const vec3 gold{.64f,.43f,.20f},gem{.25f,.73f,.68f};
+    m.beam({0,-.79f,.03f},{0,.90f,-.09f},.035f,wood*.83f,2,8);
+    m.beam({0,-.78f,.03f},{0,-.65f,.021f},.043f,gold,4,7);
+    m.beam({0,.62f,-.07f},{0,.83f,-.083f},.047f,gold,4,7);
+    for(float s:{-1.f,1.f}){
+        vec3 outer{s*.128f,.99f,-.094f};m.beam({0,.80f,-.083f},outer,.029f,gold,4,6);
+        m.beam(outer,{s*.096f,1.135f,-.105f},.019f,gold,4,6);
+    }
+    const vec3 c{0,1.015f,-.096f};
+    for(int i=0;i<6;++i){
+        float a=float(i)*pi/3,b=float(i+1)*pi/3;
+        vec3 u=c+vec3(.089f*std::cos(a),0,.075f*std::sin(a)),v=c+vec3(.089f*std::cos(b),0,.075f*std::sin(b));
+        m.triangle(u,v,c+vec3(0,.16f,0),gem*(.72f+.27f*std::cos(a)),7);
+        m.triangle(v,u,c-vec3(0,.13f,0),gem*.57f,7);
+    }
+}
+void bow(Mesh& m,vec3 drawingHand,float tension){
+    vec3 ends[2];
+    for(int k=0;k<2;++k){
+        const float dir=k?1.f:-1.f;
+        vec3 mid{0,.37f*dir,.04f},tip{0,.64f*dir,.19f};
+        m.beam({},mid,.037f,wood*1.30f,2,7);m.beam(mid,tip,.024f,wood,2,6);
+        m.beam(tip,tip+vec3(0,.032f*dir,.018f),.021f,brass*1.55f,4,6);ends[k]=tip;
+    }
+    vec3 nock=glm::mix((ends[0]+ends[1])*.5f,drawingHand,tension);
+    for(auto tip:ends)m.beam(tip,nock,.008f,{.64f,.58f,.42f},5,4);
+}
+}
+
+void buildAnimatedHero(Mesh& m,float time,float gait,float speed,const heroAnimation::Gesture& gesture,
+                       combat::Class style,combat::Weapon weapon)
+{
+    speed=std::clamp(speed,0.0f,1.0f);
+    const size_t heroStart=m.vertices.size();
+    const auto pose=heroAnimation::sample(time,gait,speed,gesture.weight,gesture.pivot);
+    const bool knight=style==combat::Class::Warrior,mage=style==combat::Class::Mage;
+    const vec3 steel{.315f,.381f,.408f}, leather{.163f,.105f,.080f};
+    const vec3 fabric=knight?vec3(.43f,.096f,.092f):mage?vec3(.20f,.23f,.30f):vec3(.145f,.286f,.241f);
+    const vec3 trim{.63f,.445f,.232f},linen{.64f,.579f,.447f};
     auto T=[](vec3 p){return glm::translate(glm::mat4(1),p);};
     auto R=[](float angle){return glm::rotate(glm::mat4(1),angle,vec3{1,0,0});};
+    auto turn=[](float angle){return glm::rotate(glm::mat4(1),angle,vec3{0,1,0});};
+    auto roll=[](float angle){return glm::rotate(glm::mat4(1),angle,vec3{0,0,1});};
     auto boneFrame=[&](vec3 from,vec3 to) {
         vec3 y=glm::normalize(from-to),x=glm::normalize(glm::cross(y,vec3{0,0,1}));
         glm::mat4 frame(1);
@@ -391,89 +490,147 @@ void buildAnimatedHero(Mesh& m, float time, float gait, float speed, float cast)
         return frame;
     };
     const glm::mat4 body=T(pose.pelvisOffset)*T({0,1.10f,0})*
-        glm::rotate(glm::mat4(1),pose.torsoYaw,vec3{0,1,0})*
-        glm::rotate(glm::mat4(1),pose.torsoRoll,vec3{0,0,1})*T({0,-1.10f,0});
+        turn(pose.torsoYaw+gesture.torso.y)*roll(pose.torsoRoll+gesture.torso.z)*
+        R(-speed*.095f+gesture.torso.x)*T({0,-1.10f,0});
     // The feet drive the skeleton. Both bones meet the exact ankle target.
     for(const auto& leg:pose.legs) {
         size_t first=m.vertices.size();
         m.beam({0,0,0},{0,-.39f,0},.095f,leather,2,10);
-        m.block({0,-.18f,-.06f},{.16f,.29f,.105f},.028f,steel,3);
+        m.block({0,-.18f,-.06f},{.16f,.29f,.105f},.028f,knight?steel:leather*1.4f,knight?3.f:2.f);
         transform(m,first,boneFrame(leg.hip,leg.knee));
         first=m.vertices.size();
-        m.sphere({0,0,-.025f},{.105f,.105f,.105f},steel*1.12f,3,10,6);
+        m.sphere({0,0,-.025f},{.105f,.105f,.105f},knight?steel*1.12f:leather*1.18f,knight?3.f:2.f,10,6);
         m.beam({0,-.035f,0},{0,-.40f,0},.075f,leather,2,10);
-        m.block({0,-.20f,-.055f},{.13f,.29f,.10f},.025f,steel*.9f,3);
+        m.block({0,-.20f,-.055f},{.13f,.29f,.10f},.025f,knight?steel*.9f:leather,knight?3.f:2.f);
         transform(m,first,boneFrame(leg.knee,leg.ankle));
         first=m.vertices.size();
-        m.block({0,-.11f,-.055f},{.19f,.22f,.31f},.035f,leather,2);
-        m.block({0,-.075f,-.13f},{.18f,.12f,.15f},.025f,steel*.8f,3);
+        garment(m,{{-.22f,.09f,.155f,-.055f},{-.185f,.097f,.155f,-.055f}},
+                leather*.63f,2,10);
+        garment(m,{{-.185f,.096f,.154f,-.055f},{-.135f,.095f,.146f,-.051f},
+                   {-.071f,.083f,.101f,-.021f},{.014f,.077f,.077f,0}},
+                   knight?steel*.72f:leather*1.16f,knight?3.f:2.f,10);
+        garment(m,{{-.075f,.086f,.096f,-.013f},{-.054f,.084f,.094f,-.013f}},leather*.72f,2,10);
         transform(m,first,T(leg.ankle)*R(leg.pitch));
     }
     size_t first=m.vertices.size();
     const float breath=.006f*std::sin(time*2.1f)*(1-speed*.6f);
     m.sphere({0,1.12f,0},{.225f,.18f,.145f},leather,2,12,8);
-    m.block({0,1.32f+breath,-.005f},{.44f,.41f,.27f},.065f,steel,3);
+    garment(m,{{1.06f,.188f,.14f,0},{1.18f,.215f,.157f,0},{1.38f+breath,.285f,.189f,-.013f},
+               {1.49f+breath,.258f,.15f,0},{1.55f+breath,.128f,.108f,0}},
+               knight?steel:mage?fabric:leather*1.45f,knight?3.f:5.f);
+    if(knight){
+        m.quad({0,1.17f,-.174f},{-.176f,1.37f,-.166f},{0,1.45f,-.216f},{.176f,1.37f,-.166f},steel*1.23f,3);
+        for(float side:{-1.f,1.f})m.beam({0,1.36f,-.218f},{side*.175f,1.41f,-.159f},.012f,trim,4,5);
+        garment(m,{{.87f,.267f,.18f,0},{1.03f,.236f,.168f,0},{1.12f,.2f,.143f,0}},fabric*.82f,5);
+    }else{
+        float hem=mage?.60f:.85f;
+        garment(m,{{hem,.285f,.195f,.012f},{hem+.045f,.281f,.192f,.012f}},mage?linen:trim*.74f,5);
+        garment(m,{{hem+.045f,.281f,.192f,.012f},{.96f,.245f,.16f,0},{1.14f,.191f,.15f,0}},fabric*.90f,5);
+        m.block({.19f,1.06f,.027f},{.13f,.15f,.135f},.028f,leather*1.7f,2);
+        m.sphere({-.176f,1.425f,-.126f},{.045f,.048f,.024f},trim,4,8,5);
+    }
     m.block({0,1.10f,-.02f},{.45f,.065f,.30f},.018f,leather*.8f,2);
     m.block({0,1.10f,-.178f},{.095f,.07f,.035f},.012f,brass,4);
     m.beam({-.18f,1.49f,-.15f},{.11f,1.12f,-.16f},.028f,leather,2,6);
     transform(m,first,body);
     first=m.vertices.size();
-    m.cylinder({0,1.60f+breath,0},.105f,.105f,.12f,iron,3,12);
-    m.sphere({0,1.80f+breath,-.008f},{.165f,.205f,.16f},steel,3,16,10);
-    m.block({0,1.77f+breath,-.15f},{.25f,.16f,.055f},.02f,steel*.86f,3);
-    m.box({0,1.81f+breath,-.181f},{.205f,.018f,.008f},vec3{.025f},3);
-    m.beam({0,1.99f,-.08f},{0,1.99f,.07f},.015f,steel*1.3f,3,6);
-    transform(m,first,T(pose.headOffset));
-    for(int side:{-1,1}) {
+    m.cylinder({0,1.585f+breath,0},.128f,.105f,.15f,fabric*.75f,5,10);
+    if(knight){
+        garment(m,{{1.60f+breath,.146f,.154f,0},{1.76f+breath,.184f,.182f,-.005f},
+                   {1.88f+breath,.180f,.174f,0},{1.99f+breath,.097f,.102f,.012f},
+                   {2.015f+breath,.012f,.018f,.012f}},steel,3);
+        for(float side:{-1.f,1.f}){
+            vec3 brow{side*.16f,1.86f+breath,-.138f},cheek{side*.144f,1.75f+breath,-.151f};
+            m.quad({0,1.83f+breath,-.202f},brow,cheek,{0,1.783f+breath,-.199f},iron*.45f,3);
+            m.beam({0,1.855f+breath,-.203f},brow,.014f,trim,4,6);
+        }
+        m.beam({0,1.855f+breath,-.201f},{0,1.735f+breath,-.199f},.019f,trim,4,6);
+        // A short swept horsehair crest breaks the helmet silhouette from above.
+        for(int k=0;k<3;++k){
+            const float offset=float(k);
+            vec3 base{0,1.958f+breath,.03f+offset*.032f},crown{0,2.135f+breath-offset*.04f,.085f+offset*.055f};
+            for(float side:{-1.f,1.f})m.triangle(base+vec3(.035f*side,0,-.035f),crown,
+                {0,2.06f+breath-offset*.055f,.173f+offset*.064f},fabric*(1.14f-offset*.1f),5);
+        }
+    }else hood(m,mage,breath,mage?vec3(.62f,.57f,.51f):fabric,mage?trim:fabric*1.40f);
+    // Keep the skull attached to the moving collar while it counterbalances the shoulders.
+    const vec3 collar=vec3(body*glm::vec4(0,1.57f,0,1));
+    const glm::mat4 head=T(collar)*turn(pose.torsoYaw*.52f+gesture.torso.y*.48f)*
+        roll((pose.torsoRoll+gesture.torso.z)*.47f)*R((gesture.torso.x-speed*.095f)*.60f)*T({0,-1.57f,0});
+    transform(m,first,head);
+    vec3 drawingHand{};
+    for(int side:{1,-1}) {
         float phase=gait+(side<0?pi:0);
-        float swing=-std::cos(phase-.22f)*(side>0?.18f:.09f)*speed+(side>0?cast*1.9f:cast*.35f);
-        glm::mat4 upper=body*T({float(side)*.29f,1.48f+breath,0})*R(swing);
+        const bool right=side>0,grippingStaff=right&&weapon==combat::Weapon::Staff;
+        const vec3 arm=right?gesture.right:gesture.left;
+        const float swing=-std::cos(phase-.22f)*(grippingStaff?.19f:.34f)*speed;
+        glm::mat4 upper=body*T({float(side)*.262f,1.48f+breath,0})*turn(arm.y)*
+            roll(float(side)*(knight?.22f:.15f)+arm.z)*R(.12f+swing+arm.x);
         first=m.vertices.size();
-        m.sphere({0,.015f,0},{.145f,.105f,.16f},steel*1.12f,3,12,8);
+        m.sphere({0,.015f,0},{knight?.170f:.137f,.108f,knight?.167f:.13f},
+                 knight?steel*1.12f:fabric*1.16f,knight?3.f:5.f,12,7);
+        if(knight)m.sphere({side*.052f,-.044f,-.005f},{.128f,.066f,.147f},trim*.78f,4,10,5);
         m.beam({0,-.05f,0},{0,-.27f,0},.068f,leather,2,10);
-        m.block({0,-.16f,-.035f},{.115f,.17f,.12f},.025f,steel,3);
+        m.block({0,-.16f,-.035f},{.115f,.17f,.12f},.025f,knight?steel:fabric*.83f,knight?3.f:5.f);
         transform(m,first,upper);
-        glm::mat4 lower=upper*T({0,-.27f,0})*R((side>0?.22f:.40f)+.04f*speed*std::sin(phase-.5f)+cast*.4f);
+        float elbow=(grippingStaff?.64f:knight?.43f:.55f)+.14f*speed*std::sin(phase-.45f)+(right?gesture.bend.x:gesture.bend.y);
+        glm::mat4 lower=upper*T({0,-.27f,0})*R(elbow);
         first=m.vertices.size();
         m.sphere({0,0,0},vec3{.075f},steel*.8f,3,10,6);
-        m.beam({0,-.015f,0},{0,-.25f,0},.065f,steel*.85f,3,10);
+        m.beam({0,-.015f,0},{0,-.25f,0},.065f,knight?steel*.85f:leather*1.26f,knight?3.f:2.f,10);
+        m.beam({0,-.185f,0},{0,-.221f,0},.072f,trim*.82f,4,8);
         m.sphere({0,-.28f,0},{.065f,.085f,.07f},leather,2,10,6);
         transform(m,first,lower);
-        glm::mat4 hand=lower*T({0,-.28f,0});
+        glm::mat4 hand=lower*T({0,-.28f,0})*R(right?gesture.wrist.x:gesture.wrist.y);
+        if(right){hand=hand*roll(gesture.wrist.z);drawingHand=vec3(hand[3]);}
         first=m.vertices.size();
-        if(side>0) {
-            m.beam({0,.09f,0},{0,-.10f,0},.026f,leather,2,8);
-            m.beam({-.12f,-.11f,0},{.12f,-.11f,0},.018f,brass,4,8);
-            vec3 a{-.035f,-.14f,0},b{0,-.14f,.018f},c{.035f,-.14f,0},d{0,-.14f,-.018f},tip{0,-.80f,-.035f};
-            m.triangle(a,b,tip,steel*1.55f,3); m.triangle(b,c,tip,steel*1.15f,3);
-            m.triangle(c,d,tip,steel*1.35f,3); m.triangle(d,a,tip,steel,3);
-        } else {
+        if(grippingStaff){
+            // The crystal sits above the grip. The wrist counter-rotates as
+            // the arm extends so the lit end points at the spell's target.
+            const float aimedPitch=-.16f-.43f*arm.x-1.38f*gesture.wrist.x;
+            hand=T(vec3(hand[3]))*turn(pose.torsoYaw+gesture.torso.y*.52f+arm.y*.65f)*
+                roll(arm.z*.55f+gesture.wrist.z*.48f)*R(aimedPitch);
+            staff(m);
+        }
+        else if(!right&&weapon==combat::Weapon::Bow){
+            hand=hand*R(-elbow);
+            bow(m,vec3(glm::inverse(hand)*glm::vec4(drawingHand,1)),gesture.draw);
+        }
+        else if(weapon==combat::Weapon::Daggers||(right&&weapon==combat::Weapon::Sword))blade(m,weapon==combat::Weapon::Daggers);
+        else if(!right&&weapon==combat::Weapon::Sword) {
             vec3 corners[]={{-.19f,.28f,-.08f},{.19f,.28f,-.08f},{.21f,-.03f,-.08f},{0,-.33f,-.08f},{-.21f,-.03f,-.08f}};
             for(int i=0;i<5;++i) {
-                m.triangle({0,.04f,-.13f},corners[i],corners[(i+1)%5],cloth*.7f,5);
+                m.triangle({0,.04f,-.13f},corners[i],corners[(i+1)%5],fabric*.84f,5);
                 m.triangle({0,.04f,-.065f},corners[(i+1)%5],corners[i],wood*.7f,2);
                 m.beam(corners[i],corners[(i+1)%5],.018f,steel,3,6);
             }
-            m.beam({0,.21f,-.145f},{0,-.20f,-.145f},.015f,brass,4,6);
+            for(float s:{-1.f,1.f})m.quad({0,.04f,-.143f},{s*.137f,.135f,-.123f},
+                {s*.098f,.019f,-.131f},{0,-.098f,-.137f},linen,5);
+            m.sphere({0,.044f,-.145f},{.050f,.05f,.024f},trim,4,8,5);
         }
         transform(m,first,hand);
     }
     first=m.vertices.size();
     auto cape=[&](int row,int col) {
         float v=float(row)/12,u=float(col)/10-.5f;
-        float flutter=.008f*v*v*std::sin(time*2.5f-u*5+v*4)
-            +.045f*speed*v*v*std::sin(gait-.8f-v*1.4f-u*2);
-        return vec3{u*(.44f+.32f*v)+.045f*speed*v*v*std::sin(gait-.6f-v),
-                    1.51f-v*1.21f+breath+.015f*v*std::cos(u*8*pi),
-                    .16f+.18f*v+.025f*std::sin(u*8*pi)*v+flutter};
+        float flutter=v*v*(.012f*std::sin(time*2.5f-u*5+v*4)+speed*(.085f+.068f*std::sin(gait-.8f-v*1.4f-u*2)));
+        const float length=knight?1.06f:mage?.96f:.63f;
+        return vec3{u*(.44f+.22f*v)+v*v*(.067f*speed*std::sin(gait-.6f-v)-gesture.bend.z*.11f),
+                    1.54f-v*length+breath+v*.034f*std::cos(u*6*pi)+(!knight&&!mage?u*v*.20f:0),
+                    .15f+.19f*v+.038f*std::sin(u*6*pi)*v+flutter+.09f*gesture.bend.z*v*v};
     };
     for(int row=0;row<12;++row) for(int col=0;col<10;++col) {
         vec3 a=cape(row,col),b=cape(row+1,col),c=cape(row+1,col+1),d=cape(row,col+1);
-        vec3 color=cloth*(.88f+.035f*float(col%4));
+        const bool border=(row==10||(mage&&(col==0||col==9)));
+        const vec3 color=border?(knight?trim*.77f:linen*.84f):fabric*(.84f+.13f*std::cos(float(col)*.62f));
         m.quad(a,b,c,d,color,5); m.quad(d,c,b,a,color*.85f,5);
     }
     transform(m,first,body);
-
+    if(gesture.spin!=0.f){
+        // The left heel is the pivot of the warrior's sweeping turn.
+        const vec3 heel=pose.legs[0].ankle;
+        transform(m,heroStart,T(heel)*turn(gesture.spin)*T(-heel));
+    }
 }
 
 void buildHero(Mesh& m) { buildAnimatedHero(m,0,0,0,0); }

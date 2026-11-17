@@ -2,6 +2,9 @@
 #include <glad/gl.h>
 #include <GLFW/glfw3.h>
 #include "audio.hpp"
+#include "combat_visuals.hpp"
+#include "hero_animation.hpp"
+#include "hero_fall.hpp"
 #include "renderer.hpp"
 #include "rpg.hpp"
 #include "settings.hpp"
@@ -14,7 +17,7 @@ enum class Screen { Menu, ClassSelect, Game };
 enum class Window { None, Inventory, Character, Journal, Map, Shop, Craft, Smith, Shrine, Travel, Dialog, Note, Reward,
                     Pause, Settings, Help, Load, Save, Defeat, Epilogue, Ending, Credits, ConfirmNew, ConfirmMenu };
 
-struct Floater { std::string text; glm::vec3 position; float time; glm::vec4 color; };
+struct Floater { std::string text; glm::vec3 position; float time; glm::vec4 color; bool impactSound=false; };
 
 struct LaunchOptions {
     bool smoke=false, benchmark=false;
@@ -40,6 +43,8 @@ private:
     Ui ui;
     Screen screen=Screen::Menu;
     Window win=Window::None;
+    Window displayedWindow=Window::None;
+    float windowOpenedAt=0;
     std::vector<Window> stack;           // windows to return to (settings from pause, etc.)
     rpg::Campaign game;
     rpg::Campaign menuWorld;
@@ -48,9 +53,17 @@ private:
     std::string visualZone;
     std::unique_ptr<GpuMesh> dynamicGpu, heroGpu;
     Mesh dynamicMesh, heroMesh;
+    CombatVisuals combatVisuals;
+    std::vector<Particle> combatParticles;
     // presentation state
-    glm::vec3 heroPos{0}; float heroYaw=0, gait=0, moveBlend=0, castBlend=0, pulse=0;
+    glm::vec3 heroPos{0}; float heroYaw=0, gait=0, moveBlend=0;
+    heroAnimation::Action heroAction;
+    heroAnimation::Fall heroFall;
     std::vector<glm::vec3> actorPos; std::vector<float> actorYaw;
+    struct ActorGait { float phase=0, weight=0, deathSeconds=-1.f, impactAt=-1000.f; };
+    std::vector<ActorGait> actorGait;
+    Window pendingBossWindow=Window::None;
+    float bossWindowAt=0;
     int pendingInteract=-1;
     glm::vec3 clickPoint{0}; float clickTimer=0; bool clickAttack=false;
     world::Cell hover{-1,-1}; glm::vec3 hoverPoint{0}; bool hoverValid=false;
@@ -77,6 +90,7 @@ private:
     float scroll=0;
     // window-specific state
     int selected=-1, dialogLine=0, slotConfirm=-1, settingsResolution=-1;
+    int inventoryPage=0;
     std::string shopNpc, status, team="Daniyal Tapishev", topic="Тема уточняется (см. assets/team.txt)";
     std::string defeatMessage;
     int lastToastCount=0;
@@ -91,13 +105,12 @@ private:
     bool loadSlot(const fs::path& path);
     fs::path slotPath(int slot) const;
     void autosave();
-    void syncActors(bool snap);
+    void syncActors(bool snap,float dt=0);
     void refreshVisuals(bool force);
     void updateCamera(float dt);
     void pick();
     void gameInput(float dt);
     void followHero(float dt);
-    void animateActors(float dt);
     void handleRequests();
     void consumeEvents();
     void buildDynamic(float time);
@@ -115,6 +128,8 @@ private:
     void drawClassSelect();
     void drawHud();
     void drawBattleHud();
+    void drawWindowShortcuts(float x,float y,bool compact);
+    bool overActionBar() const;
     void drawWindows();
     void drawInventory(bool shop);
     void drawCharacter();

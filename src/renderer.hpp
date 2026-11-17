@@ -69,7 +69,7 @@ public:
                 const std::vector<Particle>& extraParticles);
     std::vector<Particle> particles(float time, glm::vec3 focus, const RenderSettings& s) const;
     GLuint uiProgram=0;
-    Texture font, stonePaint;
+    Texture font, stonePaint, actionIcons, interfaceEmblems, coverArt;
     fs::path root;
 private:
     GLuint scene=0, shadow=0, pointShadow=0, blur=0, post=0, sky=0, particle=0;

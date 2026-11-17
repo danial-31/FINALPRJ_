@@ -73,11 +73,73 @@ struct Builder {
             out.mesh.beam(p-vec3(0,.12f,0),p,.012f,{.2f,.35f,.12f},mat::Foliage,4);
             out.mesh.sphere(p,vec3(.05f),colors[int(hash(x,y,70+i)*4)%4],mat::Foliage,6,4);}
     }
+    void broadleafCrown(vec3 p,vec3 size,vec3 pigment,int seed,bool flowering=false){
+        // Skew the shoulder and the cap separately so adjacent crowns interlock.
+        constexpr int sides=9;
+        const float heights[]={-.81f,-.39f,.20f,.65f}, radii[]={.43f,.88f,1.f,.70f};
+        vec3 rings[4][sides];
+        for(int row=0;row<4;++row)for(int i=0;i<sides;++i){
+            float a=2*pi*float(i)/sides+.13f*float(row)+.31f*float(seed);
+            float r=radii[row]*(.87f+.23f*hash(i,row,seed));
+            float h=heights[row]+(hash(row,i,seed)-.5f)*.22f;
+            rings[row][i]=p+size*vec3(r*std::cos(a)+.06f*row,h,r*std::sin(a));
+        }
+        size_t first=out.mesh.vertices.size();
+        const float values[]={.72f,.86f,1.01f};
+        for(int i=0;i<sides;++i){
+            int next=(i+1)%sides;
+            float tint=.96f+.08f*hash(i,7,seed);
+            for(int row=0;row<3;++row)
+                out.mesh.quad(rings[row][i],rings[row+1][i],rings[row+1][next],rings[row][next],pigment*values[row]*tint,mat::Foliage);
+            out.mesh.triangle(rings[3][i],p+size*vec3(.15f,.91f,-.07f),rings[3][next],pigment*1.06f,mat::Foliage);
+            out.mesh.triangle(rings[0][next],p-size*vec3(.04f,.96f,0),rings[0][i],pigment*.69f,mat::Foliage);
+        }
+        for(size_t k=first;k<out.mesh.vertices.size();++k){
+            auto& v=out.mesh.vertices[k];
+            vec3 radial=glm::normalize((v.position-p)/(size*size));
+            v.normal=glm::normalize(glm::mix(v.normal,radial,.58f));
+        }
+        if(!flowering)return;
+        for(int i=seed%3;i<sides;i+=3){
+            vec3 a=rings[2][i], up=rings[3][i]-a, across=rings[3][(i+1)%sides]-rings[3][i];
+            vec3 lift=.007f*glm::normalize(glm::cross(up,across));
+            const vec3 petal=glm::mix(pigment,vec3(.96f,.81f,.72f),.52f);
+            for(int bud=0;bud<3;++bud){
+                vec3 q=a+lift+up*(.46f+.14f*bud)+across*(bud==1?.31f:.16f);
+                out.mesh.quad(q-across*.10f,q+up*.11f,q+across*.09f,q-up*.07f,petal,mat::Foliage);
+            }
+        }
+    }
+    void pineBoughs(vec3 p,float scale,vec3 needles,int seed,bool snowy){
+        constexpr int tips=9;
+        for(int tier=0;tier<3;++tier){
+            float radius=(1.04f-.25f*tier)*scale, height=(1.22f+.73f*tier)*scale;
+            vec3 edge[tips], ridge[tips];
+            for(int i=0;i<tips;++i){
+                float a=2*pi*float(i)/tips+.39f*float(tier)+float(seed)*.2f;
+                vec3 ray(std::cos(a),0,std::sin(a));
+                edge[i]=p+ray*radius*(.89f+.16f*hash(i,tier,seed))+vec3(0,height-(.11f+.17f*hash(tier,i,seed))*scale,0);
+                ridge[i]=p+ray*radius*.58f+vec3(0,height+(.42f+.15f*hash(i,9,seed))*scale,0);
+            }
+            vec3 crown=p+vec3(.04f*scale,height+1.01f*scale,-.02f*scale);
+            for(int i=0;i<tips;++i){
+                int j=(i+1)%tips;
+                vec3 notch=glm::mix(p,(edge[i]+edge[j])*.5f,.69f);
+                notch.y=height+p.y+.055f*scale;
+                vec3 hue=needles*(.88f+.08f*float(tier)+.10f*hash(i,1,seed));
+                out.mesh.triangle(edge[i],ridge[i],notch,hue,mat::Foliage);
+                out.mesh.triangle(notch,ridge[j],edge[j],hue*.83f,mat::Foliage);
+                out.mesh.triangle(notch,ridge[i],ridge[j],hue*1.03f,mat::Foliage);
+                bool frost=snowy&&(tier==2||hash(i,tier,seed)>.67f);
+                out.mesh.triangle(ridge[i],crown,ridge[j],frost?vec3(.76f,.82f,.82f):hue*1.10f,frost?mat::Snow:mat::Foliage);
+            }
+        }
+    }
     void tree(int x,int y){
         vec3 p=at(x,y,groundAt(x,y)-.05f);float r=hash(x,y,3),r2=hash(x,y,4);
         p+=vec3((r-.5f)*.4f,0,(r2-.5f)*.4f);
         int biome=c.zone().biome;
-        if((biome==0||biome==1||biome==2)&&hash(x,y,77)>.86f){blossomTree(p,.85f+r2*.4f,hash(x,y,78)>.25f?vec3(.92f,.50f,.62f):vec3(.94f,.86f,.80f));return;}
+        if((biome==0||biome==1||biome==2)&&hash(x,y,77)>.86f){blossomTree(p,.85f+r2*.4f,hash(x,y,78)>.25f?vec3(.72f,.40f,.46f):vec3(.78f,.69f,.59f),x+7*y);return;}
         bool pine=c.zone().biome==4||c.zone().biome==2?r>.25f:r>.6f;
         float scale=.85f+r2*.5f;
         vec3 bark{.25f,.17f,.11f};
@@ -85,14 +147,12 @@ struct Builder {
         out.mesh.cylinder(p+vec3(0,.9f*scale,0),.16f*scale,.11f*scale,1.8f*scale,bark,mat::Wood,7);
         if(pine){
             vec3 green=c.zone().biome==2?vec3(.14f,.30f,.20f):vec3(.16f,.36f,.21f);
-            for(int k=0;k<3;++k){float h=(1.4f+float(k)*.85f)*scale,rad=(1.15f-float(k)*.3f)*scale;
-                out.mesh.cylinder(p+vec3(0,h,0),rad,.05f,1.3f*scale,green*(0.9f+float(k)*.12f),mat::Foliage,9);}
-            if(c.zone().biome==4)out.mesh.cylinder(p+vec3(0,(1.4f+2*.85f)*scale+.35f,0),.35f*scale,.03f,.5f,{.9f,.92f,.95f},mat::Snow,9);
+            pineBoughs(p,scale,green,x+7*y,c.zone().biome==4);
         }else{
             vec3 green=c.zone().biome==1?vec3(.42f,.50f,.18f):vec3(.26f,.48f,.20f);
-            out.mesh.sphere(p+vec3(0,2.3f*scale,0),vec3(1.05f,.85f,1.05f)*scale,green,mat::Foliage,10,7);
-            out.mesh.sphere(p+vec3(.45f,2.0f*scale,.25f),vec3(.7f,.6f,.7f)*scale,green*1.12f,mat::Foliage,9,6);
-            out.mesh.sphere(p+vec3(-.4f,2.6f*scale,-.2f),vec3(.65f,.55f,.65f)*scale,green*0.9f,mat::Foliage,9,6);
+            out.mesh.beam(p+vec3(0,1.12f,0)*scale,p+vec3(-.47f,2.24f,-.17f)*scale,.08f*scale,bark,mat::Wood,6);
+            broadleafCrown(p+vec3(-.28f,2.49f,-.17f)*scale,vec3(.83f,.79f,.84f)*scale,green*.98f,x+y);
+            broadleafCrown(p+vec3(.39f,2.13f,.22f)*scale,vec3(.72f,.65f,.74f)*scale,green*1.04f,x+2*y+8);
         }
         if(c.zone().biome==2&&r>.7f)web(x,y,1.2f);
     }
@@ -197,14 +257,31 @@ struct Builder {
         light(center+vec3(0,1.6f,d*.5f+.8f),warm*1.2f,4.5f);
     }
     void cart(int x,int y){
-        vec3 p=at(x,y);float yaw=hash(x,y,1)*.8f-.4f;vec3 wood{.32f,.22f,.13f};
-        out.solid.block(p+vec3(0,.55f,0),vec3(1.2f,.18f,.8f),.03f,wood,mat::Wood,yaw);
-        out.solid.block(p+vec3(0,.78f,.38f),vec3(1.2f,.3f,.06f),.02f,wood*.9f,mat::Wood,yaw);
-        out.solid.block(p+vec3(0,.70f,-.38f),vec3(1.0f,.2f,.06f),.02f,wood*.85f,mat::Wood,yaw+.25f);
-        for(float sx:{-.45f,.45f}){vec3 wp=p+vec3(sx*std::cos(yaw),.32f,.45f);
-            Mesh wheel;wheel.cylinder(vec3(0),.32f,.32f,.08f,wood*.8f,mat::Wood,10);
-            for(auto v:wheel.vertices){vec3 q=v.position;v.position=wp+vec3(q.x,q.z,q.y);v.normal=vec3(v.normal.x,v.normal.z,v.normal.y);out.mesh.vertices.push_back(v);}}
-        out.mesh.beam(p+vec3(.6f,.5f,0),p+vec3(1.3f,.15f,.2f),.04f,wood,mat::Wood,5);
+        const vec3 p=at(x,y,groundAt(x,y));
+        const float yaw=(hash(x,y,1)-.5f)*.40f, co=std::cos(yaw), si=std::sin(yaw);
+        const vec3 oak{.44f,.28f,.17f}, iron{.19f,.23f,.24f}, copper{.58f,.41f,.23f};
+        auto point=[&](float lx,float h,float lz){return p+vec3(co*lx+si*lz,h,-si*lx+co*lz);};
+        for(int row=0;row<4;++row)
+            out.solid.block(point(-.14f,.44f,(float(row)-1.5f)*.16f),{.85f,.10f,.154f},.014f,oak*(.9f+.05f*row),mat::Wood,yaw);
+        for(float side:{-1.f,1.f}){
+            for(int row=0;row<2;++row)
+                out.solid.block(point(-.14f,.56f+.14f*row,side*.32f),{.88f,.13f,.065f},.014f,oak*(.86f+.14f*row),mat::Wood,yaw);
+            for(float post:{-.52f,.23f})
+                out.solid.block(point(post,.61f,side*.354f),{.064f,.38f,.046f},.009f,iron,mat::Steel,yaw);
+            out.mesh.beam(point(.18f,.43f,side*.20f),point(.59f,.12f,side*.23f),.037f,oak*.8f,mat::Wood,6);
+            const float wheelX=-.19f, wheelY=.32f, z=side*.425f;
+            auto rim=[&](float angle,float radius,float depth){return point(wheelX+std::cos(angle)*radius,wheelY+std::sin(angle)*radius,z+side*depth);};
+            for(int i=0;i<12;++i){
+                float a=float(i)*pi/6, b=float(i+1)*pi/6;
+                out.mesh.quad(rim(a,.238f,.036f),rim(a,.32f,.036f),rim(b,.32f,.036f),rim(b,.238f,.036f),oak*1.08f,mat::Wood);
+                out.mesh.quad(rim(a,.238f,-.036f),rim(b,.238f,-.036f),rim(b,.32f,-.036f),rim(a,.32f,-.036f),oak*.79f,mat::Wood);
+                out.mesh.quad(rim(a,.238f,-.036f),rim(a,.238f,.036f),rim(b,.238f,.036f),rim(b,.238f,-.036f),oak*.75f,mat::Wood);
+                out.mesh.quad(rim(a,.32f,.036f),rim(a,.32f,-.036f),rim(b,.32f,-.036f),rim(b,.32f,.036f),iron,mat::Steel);
+                if(i%2==0)out.mesh.beam(point(wheelX,wheelY,z),rim(a,.247f,0),.027f,oak,mat::Wood,5);
+            }
+            out.mesh.beam(point(wheelX,wheelY,z-side*.05f),point(wheelX,wheelY,z+side*.066f),.071f,copper,mat::Brass,8);
+        }
+        out.solid.block(point(-.55f,.6f,0),{.065f,.30f,.62f},.018f,oak*.9f,mat::Wood,yaw);
     }
     void crates(int x,int y){
         vec3 p=at(x,y);vec3 wood{.36f,.25f,.15f};
@@ -410,13 +487,12 @@ struct Builder {
         float w=float(W)*s,h=float(H)*s;
         out.solid.block(vec3(0,-.12f,0),vec3(w+180.f,.2f,h+180.f),0,pal.ground*.92f,mat::Ground);
     }
-    void blossomTree(vec3 p,float scale,vec3 petals){
+    void blossomTree(vec3 p,float scale,vec3 petals,int seed){
         vec3 bark{.30f,.20f,.15f};
         out.mesh.cylinder(p+vec3(0,.85f*scale,0),.14f*scale,.09f*scale,1.7f*scale,bark,mat::Wood,7);
         out.mesh.beam(p+vec3(0,1.3f*scale,0),p+vec3(.45f,1.9f,.2f)*scale,.06f*scale,bark,mat::Wood,5);
-        out.mesh.sphere(p+vec3(0,2.15f*scale,0),vec3(1.f,.8f,1.f)*scale,petals,mat::Foliage,10,7);
-        out.mesh.sphere(p+vec3(.5f,2.0f,.25f)*scale,vec3(.65f,.55f,.65f)*scale,petals*1.08f,mat::Foliage,9,6);
-        out.mesh.sphere(p+vec3(-.45f,1.85f,-.2f)*scale,vec3(.6f,.5f,.6f)*scale,petals*.92f,mat::Foliage,9,6);
+        broadleafCrown(p+vec3(-.25f,2.31f,-.15f)*scale,vec3(.86f,.72f,.84f)*scale,petals,seed,true);
+        broadleafCrown(p+vec3(.45f,1.96f,.22f)*scale,vec3(.71f,.54f,.68f)*scale,petals*1.06f,seed+9,true);
     }
     void windmill(vec3 p,float time0){
         vec3 stone=pal.rock*1.2f,wood{.38f,.26f,.15f},roof{.45f,.22f,.14f};
@@ -430,27 +506,84 @@ struct Builder {
     }
     // ---------------------------------------------------------- entities
     void shrine(const rpg::Entity& e){
-        vec3 p=at(e.cell.x,e.cell.y);bool active=c.shrineActive(e.def.id);
-        vec3 stone=pal.surface?vec3(.50f,.50f,.48f):pal.wall*1.1f;
-        out.solid.block(p+vec3(0,.12f,0),vec3(1.3f,.24f,1.3f),.06f,stone*.8f,mat::Stone);
-        out.solid.block(p+vec3(0,.36f,0),vec3(1.0f,.24f,1.0f),.06f,stone*.9f,mat::Stone);
-        out.solid.block(p+vec3(0,1.35f,0),vec3(.5f,1.8f,.5f),.08f,stone,mat::Stone,.785f);
-        out.solid.block(p+vec3(0,2.35f,0),vec3(.32f,.3f,.32f),.06f,stone*1.05f,mat::Stone,.785f);
-        vec3 rune=active?vec3(.25f,.95f,.85f):vec3(.10f,.12f,.12f);
-        for(int k=0;k<4;++k){float a=float(k)*1.5708f+.785f;vec3 n(std::cos(a),0,std::sin(a));
-            for(int r=0;r<3;++r){vec3 q=p+n*.27f+vec3(0,.85f+float(r)*.38f,0);vec3 t(-n.z,0,n.x);
-                out.mesh.quad(q-t*.09f-vec3(0,.12f,0),q+t*.09f-vec3(0,.12f,0),q+t*.09f+vec3(0,.12f,0),q-t*.09f+vec3(0,.12f,0),rune,active?mat::Glow:mat::Stone);}}
-        if(active){light(p+vec3(0,2.,0),{.4f,1.6f,1.4f},6.f);emit(p+vec3(0,1.,0),4,1);}
+        const vec3 p=at(e.cell.x,e.cell.y,groundAt(e.cell.x,e.cell.y));
+        const bool active=c.shrineActive(e.def.id);
+        const vec3 shale=glm::mix(vec3(.32f,.39f,.40f),pal.rock,.24f), bronze{.57f,.39f,.21f};
+        out.solid.block(p+vec3(0,.10f,0),{1.28f,.20f,1.28f},.075f,shale*.75f,mat::Stone);
+        out.mesh.cylinder(p+vec3(0,.27f,0),.64f,.50f,.16f,shale*1.22f,mat::Stone,8);
+        out.mesh.cylinder(p+vec3(0,.58f,0),.45f,.33f,.46f,shale,mat::Stone,8);
+        out.mesh.cylinder(p+vec3(0,.83f,0),.34f,.39f,.05f,bronze,mat::Brass,8);
+        out.mesh.cylinder(p+vec3(0,.99f,0),.37f,.52f,.28f,shale*1.17f,mat::Stone,8);
+        out.mesh.cylinder(p+vec3(0,1.16f,0),.53f,.53f,.06f,bronze*.86f,mat::Brass,8);
+
+        // Paired bronze leaves frame a faceted votive stone against open air.
+        const float heights[]={1.13f,1.48f,1.82f,2.10f,2.46f};
+        const float offsets[]={.22f,.42f,.45f,.34f,.15f};
+        const float widths[] ={.11f,.13f,.095f,.07f,0.f};
+        for(float side:{-1.f,1.f}){
+            auto leaf=[&](int row,int face){
+                float a=pi*.5f*float(face), w=widths[row];
+                return p+vec3(side*(offsets[row]+w*std::cos(a)),heights[row],side*.09f+w*std::sin(a));
+            };
+            for(int row=0;row<4;++row)for(int face=0;face<4;++face){
+                vec3 color=bronze*(face==1?1.22f:face==3?.70f:.95f);
+                out.mesh.quad(leaf(row,face),leaf(row+1,face),leaf(row+1,face+1),leaf(row,face+1),color,mat::Brass);
+            }
+        }
+        const vec3 crystal=active?vec3(.11f,.49f,.42f):vec3(.25f,.38f,.38f);
+        for(int i=0;i<6;++i){
+            auto girdle=[&](int index){float a=float(index)*pi/3;return p+vec3(.17f*std::cos(a),1.78f,.17f*std::sin(a));};
+            vec3 a=girdle(i), b=girdle(i+1);
+            float value=.72f+.15f*float((5*i)%4);
+            float material=active?mat::Glow:mat::Stone;
+            out.mesh.triangle(a,p+vec3(0,2.17f,0),b,crystal*value,material);
+            out.mesh.triangle(b,p+vec3(0,1.40f,0),a,crystal*(value*.72f),material);
+        }
+        if(active){light(p+vec3(0,1.78f,0),{.4f,1.6f,1.4f},6.f);emit(p+vec3(0,1.46f,0),4,1);}
     }
     void chest(const rpg::Entity& e){
-        vec3 p=at(e.cell.x,e.cell.y);vec3 wood{.42f,.22f,.10f},band{.40f,.33f,.18f};
-        out.solid.block(p+vec3(0,.3f,0),vec3(1.0f,.6f,.65f),.04f,wood,mat::Wood);
-        for(float sx:{-.35f,.35f})out.solid.block(p+vec3(sx,.31f,0),vec3(.08f,.62f,.67f),.01f,band,mat::Brass);
-        if(e.done){out.solid.block(p+vec3(0,.85f,-.32f),vec3(1.0f,.5f,.1f),.03f,wood*1.1f,mat::Wood);}
-        else{out.mesh.cylinder(p+vec3(0,.66f,0),.0f,.0f,0,wood,mat::Wood,4);
-            out.solid.block(p+vec3(0,.68f,0),vec3(1.02f,.18f,.67f),.06f,wood*1.1f,mat::Wood);
-            out.solid.block(p+vec3(0,.5f,.34f),vec3(.14f,.16f,.04f),.01f,{.7f,.6f,.3f},mat::Brass);
-            if(e.def.cond[0])out.solid.block(p+vec3(0,.6f,0),vec3(1.05f,.08f,.7f),.01f,{.25f,.25f,.27f},mat::Steel);}
+        const vec3 p=at(e.cell.x,e.cell.y,groundAt(e.cell.x,e.cell.y));
+        const vec3 walnut{.42f,.245f,.16f}, iron{.19f,.23f,.24f}, brass{.68f,.48f,.26f}, lining{.27f,.10f,.14f};
+        out.solid.block(p+vec3(0,.10f,0),{1.02f,.17f,.66f},.035f,walnut*.65f,mat::Wood);
+        out.solid.block(p+vec3(0,.19f,0),{.94f,.08f,.57f},.015f,lining,mat::Cloth);
+        for(float side:{-1.f,1.f}){
+            for(int k=0;k<2;++k){
+                float h=.25f+.15f*k;
+                out.solid.block(p+vec3(0,h,side*.30f),{1.01f,.145f,.066f},.012f,walnut*(.84f+.18f*k),mat::Wood);
+                out.solid.block(p+vec3(side*.47f,h,0),{.069f,.145f,.56f},.012f,walnut*.88f,mat::Wood);
+            }
+            for(float x:{-.34f,.34f})
+                out.solid.block(p+vec3(x,.30f,side*.334f),{.085f,.37f,.018f},.006f,iron,mat::Steel);
+        }
+        // The outer staves, lining and straps rotate together about the rear hinge.
+        const float angle=e.done?1.35f:0.f, co=std::cos(angle), si=std::sin(angle);
+        auto lid=[&](float x,float y,float z){
+            return p+vec3(x,.48f+y*co+(z+.33f)*si,-.33f-y*si+(z+.33f)*co);
+        };
+        auto stave=[&](float x,int index,float layer){
+            float a=float(index)*pi/6;
+            return lid(x,(.27f+layer)*std::sin(a),(.337f+layer)*std::cos(a));
+        };
+        for(int i=0;i<6;++i){
+            out.mesh.quad(stave(-.51f,i,0),stave(.51f,i,0),stave(.51f,i+1,0),stave(-.51f,i+1,0),walnut*(.84f+.10f*float(i%3)),mat::Wood);
+            out.mesh.quad(stave(.48f,i,-.026f),stave(-.48f,i,-.026f),stave(-.48f,i+1,-.026f),stave(.48f,i+1,-.026f),lining,mat::Cloth);
+            for(float side:{-1.f,1.f}){
+                float x=.51f*side;
+                out.mesh.triangle(lid(x,0,0),stave(x,i,0),stave(x,i+1,0),walnut*.84f,mat::Wood);
+                float strap=.34f*side;
+                out.mesh.quad(stave(strap-.045f,i,.009f),stave(strap+.045f,i,.009f),stave(strap+.045f,i+1,.009f),stave(strap-.045f,i+1,.009f),iron,mat::Steel);
+            }
+        }
+        for(float side:{-1.f,1.f}){
+            float x=side*.34f;
+            out.mesh.beam(lid(x-.054f,0,-.33f),lid(x+.054f,0,-.33f),.034f,brass*.8f,mat::Brass,8);
+        }
+        if(!e.done){
+            vec3 q=p+vec3(0,.49f,.347f);
+            out.mesh.quad(q+vec3(0,-.12f,0),q+vec3(.11f,0,0),q+vec3(0,.12f,0),q+vec3(-.11f,0,0),brass,mat::Brass);
+            out.solid.block(q+vec3(0,-.013f,.008f),{.028f,.067f,.012f},.004f,iron*.48f,mat::Steel);
+            if(e.def.cond[0])out.solid.block(p+vec3(0,.37f,0),{1.035f,.065f,.68f},.012f,iron,mat::Steel);
+        }
     }
     void signpost(vec3 p,bool locked,vec3 toward){
         vec3 wood{.35f,.25f,.15f};

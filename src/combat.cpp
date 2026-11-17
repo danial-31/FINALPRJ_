@@ -292,15 +292,23 @@ int Game::enemyAt(vec2 p,float radius) const{
     return best;
 }
 // Applies a melee hit now or launches a projectile.
+static void markDirectHeroImpacts(std::vector<Event>& events,size_t first){
+    for(size_t i=first;i<events.size();++i){
+        auto& e=events[i];
+        if(e.source==0&&(e.type==Event::Hit||e.type==Event::Death))e.directHeroImpact=true;
+    }
+}
 void Game::strike(int source,int target,float multiplier,Effect effect,float splash){
     auto& a=actors[size_t(source)];
     int dmg=attackDamage(source,target,multiplier);
     bool projectile=source==0?weaponStats(a.weapon).projectile:kindInfo(a.kind).ranged;
     events.push_back({Event::Attack,source,target,0,a.cell,""});
     if(projectile&&len(actors[size_t(target)].pos-a.pos)>2.f){projectiles.push_back({a.pos,source,target,source==0?16.f:11.f,dmg,effect,splash,source==0});return;}
+    size_t firstHit=events.size();
     damage(target,dmg,source);applyEffect(target,effect,source);
     if(splash>0)for(size_t i=1;i<actors.size();++i)if(int(i)!=target&&actors[i].alive()&&(source==0)&&len(actors[i].pos-actors[size_t(target)].pos)<=splash){
         damage(int(i),std::max(1,dmg/2),source);applyEffect(int(i),effect,source);}
+    if(source==0&&!projectile)markDirectHeroImpacts(events,firstHit);
 }
 // ------------------------------------------------------------------ orders
 bool Game::moveTo(vec2 point){
@@ -341,7 +349,8 @@ bool Game::cast(int slot,int target,vec2 point){
     float cdScale=(heroClass==Class::Mage&&(h.talents&T3))?.75f:1.f;
     h.mana-=float(ab.mana);h.cd[slot]=ab.cooldown*cdScale;h.path.clear();h.moving=false;
     if(dist>.1f)h.facing=std::atan2(at.x-h.pos.x,at.y-h.pos.y);
-    events.push_back({Event::Cast,0,target,slot,h.cell,ab.name});
+    events.push_back({Event::Cast,0,target,slot,h.cell,ab.name,h.pos});
+    size_t firstHit=events.size();
     auto around=[&](vec2 c,float r,auto fn){for(size_t i=1;i<actors.size();++i)if(actors[i].alive()&&len(actors[i].pos-c)<=r+actors[i].radius)fn(int(i));};
     switch(heroClass){
     case Class::Warrior:
@@ -364,6 +373,7 @@ bool Game::cast(int slot,int target,vec2 point){
         if(slot==3){Telegraph t;t.owner=0;t.shape=0;t.center=at;t.radius=ab.radius;t.total=t.time=1.f;t.damage=70+h.power*3;t.effect=Effect::Burn;t.label="Метеор";telegraphs.push_back(t);}
         break;
     }
+    markDirectHeroImpacts(events,firstHit);
     return true;
 }
 void Game::engage(int trigger){
@@ -399,7 +409,7 @@ void Game::telegraph(int owner,Telegraph t){
 void Game::resolveTelegraph(const Telegraph& t){
     if(t.owner==0){ // hero meteor
         for(size_t i=1;i<actors.size();++i)if(actors[i].alive()&&t.contains(actors[i].pos)){damage(int(i),t.damage,0);applyEffect(int(i),t.effect,0);}
-        events.push_back({Event::Hit,0,-1,0,cellOf(t.center),"meteor"});return;
+        events.push_back({Event::Hit,0,-1,0,cellOf(t.center),"meteor",t.center});return;
     }
     if(t.owner<0||t.owner>=int(actors.size())||!actors[size_t(t.owner)].alive())return;
     auto& boss=actors[size_t(t.owner)];auto& h=actors[0];

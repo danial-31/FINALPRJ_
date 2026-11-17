@@ -33,7 +33,7 @@ endif()
 add_library(miniaudio INTERFACE)
 target_include_directories(miniaudio SYSTEM INTERFACE third_party/miniaudio)
 add_executable(finalprj src/main.cpp src/app.cpp src/app_ui.cpp src/renderer.cpp src/zone_mesh.cpp
-    src/figures.cpp src/architecture.cpp src/props.cpp)
+    src/figures.cpp src/architecture.cpp src/props.cpp src/combat_visuals.cpp)
 # miniaudio is a large third-party header: build it apart from the /W4 game sources.
 add_library(audio STATIC src/audio.cpp)
 target_link_libraries(audio PUBLIC miniaudio)

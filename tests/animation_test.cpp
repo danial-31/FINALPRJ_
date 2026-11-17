@@ -59,7 +59,7 @@ int main()
     Mesh previous,current;
     buildAnimatedHero(previous,0,0,0,0);
     float totalMotion=0;
-    for(int frame=1;frame<=960;++frame) {
+    for(int frame=1;frame<=2400;++frame) {
         float time=float(frame)/240,blend=heroAnimation::smooth(std::min(time,4-time));
         current.vertices.clear();buildAnimatedHero(current,time,time*7,blend,.15f*std::sin(time)*std::sin(time));
         if(current.vertices.size()!=previous.vertices.size()){std::cerr<<"Topology changed\n";return 1;}
@@ -73,5 +73,67 @@ int main()
         previous.vertices.swap(current.vertices);
     }
     if(totalMotion<1){std::cerr<<"No animation\n";return 1;}
+    for(auto weapon:{combat::Weapon::Sword,combat::Weapon::Daggers,combat::Weapon::Bow,combat::Weapon::Staff}) {
+        const auto style=weapon==combat::Weapon::Sword?combat::Class::Warrior:
+                         weapon==combat::Weapon::Staff?combat::Class::Mage:combat::Class::Rogue;
+        heroAnimation::Action action;
+        previous.vertices.clear();
+        buildAnimatedHero(previous,0,0,0,action.current,style,weapon);
+        action.start(weapon);
+        for(int frame=1;frame<200;++frame){
+            // Retrigger a skill in mid-swing, as can happen during auto-attack.
+            if(frame==50)action.start(weapon,0);
+            action.advance(1.f/240);
+            current.vertices.clear();
+            buildAnimatedHero(current,float(frame)/240,0,0,action.current,style,weapon);
+            if(previous.vertices.size()!=current.vertices.size())return 1;
+            for(size_t i=0;i<current.vertices.size();++i){
+                const auto& v=current.vertices[i];
+                const float step=glm::length(v.position-previous.vertices[i].position);
+                if(!std::isfinite(step)||!near(glm::length(v.normal),1,.002f)||step>.24f) {
+                    std::cerr<<"Weapon pose discontinuity: weapon "<<int(weapon)<<" frame "<<frame<<"\n";return 1;
+                }
+            }
+            previous.vertices.swap(current.vertices);
+        }
+        // Each slot must have a distinct contact pose, release to neutral and
+        // preserve leg lengths even when cast while finishing a long stride.
+        glm::vec3 handAtContact[4];
+        for(int slot=0;slot<4;++slot){
+            const auto& clip=heroAnimation::combatClip(weapon,style,slot);
+            const auto contact=heroAnimation::attackPose(weapon,slot,clip.contact,style);
+            handAtContact[slot]=contact.right-contact.left;
+            for(int other=0;other<slot;++other){
+                if(glm::distance(handAtContact[slot],handAtContact[other])<.18f)return 1;
+            }
+            for(int frame=0;frame<=240;++frame){
+                float t=float(frame)/240;
+                auto gesture=heroAnimation::attackPose(weapon,slot,t,style);
+                for(float speed:{0.f,.5f,1.f}){
+                    auto pose=heroAnimation::sample(t,t*2*pi,speed,gesture.weight,gesture.pivot);
+                    for(const auto& leg:pose.legs){
+                        if(!near(glm::distance(leg.hip,leg.knee),heroAnimation::thighLength,.001f)||
+                           !near(glm::distance(leg.knee,leg.ankle),heroAnimation::shinLength,.001f)){
+                            std::cerr<<"Unreachable action stance, weapon "<<int(weapon)<<" slot "<<slot<<" t "<<t<<'\n';
+                            return 1;
+                        }
+                    }
+                }
+                current.vertices.clear();buildAnimatedHero(current,t,0,0,gesture,style,weapon);
+                for(size_t i=0;i<current.vertices.size();++i){
+                    const auto& v=current.vertices[i];
+                    if(!std::isfinite(v.position.y)||v.position.y<-.05f||
+                       (frame>0&&glm::distance(v.position,previous.vertices[i].position)>.24f)){
+                        std::cerr<<"Action mesh discontinuity/ground contact, weapon "<<int(weapon)
+                                 <<" slot "<<slot<<" frame "<<frame<<" vertex "<<i<<" height "<<v.position.y
+                                 <<" step "<<(frame>0?glm::distance(v.position,previous.vertices[i].position):0.f)<<'\n';
+                        return 1;
+                    }
+                }
+                previous.vertices.swap(current.vertices);
+                if(frame==240&&(glm::length(gesture.right)+glm::length(gesture.left)+glm::length(gesture.weight)>.0001f))return 1;
+            }
+        }
+    }
     std::cout<<"IK reach, grounded support, swing clearance, boundary continuity, stride matching and mesh transitions pass.\n";
 }

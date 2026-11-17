@@ -81,7 +81,16 @@ Renderer::Renderer(const fs::path& r):root(r){
     particle=loadProgram(dir,"particle.vert","particle.frag");
     uiProgram=loadProgram(dir,"ui.vert","ui.frag");
     if(!font.load(root/"assets/combat-font.png",false))throw std::runtime_error("Missing required asset: assets/combat-font.png");
+    // Use the padded glyphs' lower-resolution coverage for small HUD captions.
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MAX_LEVEL,3);
+    if(!actionIcons.load(root/"assets/action-icons.png",false))throw std::runtime_error("Missing required asset: assets/action-icons.png");
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR);
+    if(!interfaceEmblems.load(root/"assets/interface-emblems.png",false))throw std::runtime_error("Missing required asset: assets/interface-emblems.png");
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR);
     stonePaint.load(root/"assets/stone-paint.png",true);
+    if(!coverArt.load(root/"assets/ossuary-cover.jpg",false))throw std::runtime_error("Missing required asset: assets/ossuary-cover.jpg");
+    glTexParameteri(GL_TEXTURE_2D,GL_TEXTURE_MIN_FILTER,GL_LINEAR_MIPMAP_LINEAR);
     glGenVertexArrays(1,&screenVao);
     glGenVertexArrays(1,&particleVao);glGenBuffers(1,&particleVbo);
     glBindVertexArray(particleVao);glBindBuffer(GL_ARRAY_BUFFER,particleVbo);
@@ -206,7 +215,11 @@ void Renderer::render(const FrameInput& f,const RenderSettings& s,const GpuMesh&
         if(culled){glEnable(GL_CULL_FACE);glCullFace(GL_BACK);}
         zoneSolid.draw();
         glDisable(GL_CULL_FACE);
-        zoneMesh.draw();dyn.draw();
+        zoneMesh.draw();
+        // Only scenery obstructs the view. Tall characters and their weapons
+        // extend into the same camera-space cutaway volume as nearby walls.
+        if(program==scene)setFloat(scene,"cutaway",0.f);
+        dyn.draw();
         setMatrix(program,"model",heroModel);hero.draw();
     };
     // Omnidirectional torch shadows (static scenery cached, moving figures redrawn).

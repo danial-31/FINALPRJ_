@@ -77,11 +77,14 @@ struct Telegraph {
 };
 struct Hazard { glm::vec2 center; float radius, time; int dps; };
 struct Projectile { glm::vec2 pos; int source, target; float speed; int damage; Effect effect; float splash; bool hero; };
+inline constexpr float heroImpactLeadSeconds=.14f;
 struct Event {
     enum Type { Hit, Death, Summon, Heal, Status, Warn, Vulnerable, PhaseTwo, BattleStart, BattleEnd, Trap, LevelUp, Miss, Step, Attack, Cast } type;
     int source=-1, target=-1, amount=0;
     Cell cell;
     std::string text;
+    glm::vec2 origin{0}; // exact cast origin or meteor contact point for presentation
+    bool directHeroImpact=false; // synchronous contact from the hero's melee swing or instant skill
 };
 
 class Game {

@@ -18,11 +18,12 @@ App::App(GLFWwindow* w,const fs::path& r,const LaunchOptions& o):window(w),root(
     if(automated(o)){settings.vsync=false;settings.fullscreen=false;}
     if(!o.technique)settings.technique=false;
     renderer=std::make_unique<Renderer>(root);
-    ui.init(renderer->uiProgram,renderer->font.id);
+    ui.init(renderer->uiProgram,renderer->font.id,renderer->actionIcons.id,renderer->interfaceEmblems.id,renderer->coverArt.id);
     audio=std::make_unique<Audio>();
     dynamicGpu=std::make_unique<GpuMesh>();heroGpu=std::make_unique<GpuMesh>();
     {std::ifstream t(root/"assets/team.txt");std::string a,b;if(std::getline(t,a)&&!a.empty())team=a;if(std::getline(t,b)&&!b.empty())topic=b;}
     menuWorld.newGame(combat::Class::Warrior);
+    menuWorld.enterZone("village",'@');
     menuWorld.flags.insert("menu_preview");
     applySettings(true);
     glfwSetWindowUserPointer(window,this);
@@ -31,7 +32,7 @@ App::App(GLFWwindow* w,const fs::path& r,const LaunchOptions& o):window(w),root(
     if(!o.zone.empty()&&!o.menu){
         combat::Class c=o.cls=="rogue"?combat::Class::Rogue:o.cls=="mage"?combat::Class::Mage:combat::Class::Warrior;
         startNewGame(c);
-        if(o.zone!="village"){game.enterZone(o.zone,'@');if(game.hero().cell.x<0)game.enterZone(o.zone,'[');}
+        if(o.zone!=game.zoneId)game.enterZone(o.zone,'@');
         game.requests.clear();syncActors(true);refreshVisuals(true);
         if(o.battle){
             int target=-1;float best=1e9f;
@@ -49,7 +50,12 @@ App::App(GLFWwindow* w,const fs::path& r,const LaunchOptions& o):window(w),root(
     // Development aid for screenshots: open a specific window (--window name).
     const std::string& wnd=o.window;
     if(!wnd.empty()){
-        if(screen!=Screen::Game&&wnd!="classes"){startNewGame(combat::Class::Warrior);}
+        if(screen!=Screen::Game&&wnd!="classes"){
+            startNewGame(combat::Class::Warrior);
+            if(wnd=="dialog"||wnd=="shrine"){
+                game.enterZone("village",'@');game.requests.clear();syncActors(true);refreshVisuals(true);
+            }
+        }
         if(wnd=="classes"){screen=Screen::ClassSelect;}
         auto talkTo=[&](const char* npc){for(size_t i=0;i<game.entities.size();++i)if(std::string(game.entities[i].def.id)==npc){game.interact(int(i));handleRequests();return;}};
         if(wnd=="inventory"||wnd=="shop"){for(auto id:{"potion","greater_potion","ore","herb","silk","militia_sword","leather_armor","wolf_tooth","mine_key"})game.addItem(id,1,0,false);selected=1;}
@@ -66,7 +72,7 @@ App::App(GLFWwindow* w,const fs::path& r,const LaunchOptions& o):window(w),root(
         else if(wnd=="settings")win=Window::Settings;
         else if(wnd=="help")win=Window::Help;
         else if(wnd=="load")win=Window::Load;
-        else if(wnd=="defeat")win=Window::Defeat;
+        else if(wnd=="defeat")game.game.damage(0,game.hero().hp);
         else if(wnd=="reward"){game.rewardChoices={"chitin_blade","queen_fangs","silkweaver_staff"};win=Window::Reward;}
         else if(wnd=="epilogue")win=Window::Epilogue;
         else if(wnd=="ending")win=Window::Ending;
@@ -117,11 +123,47 @@ void App::autosave(){
     if(game.save(slotPath(0),error))game.toast("Автосохранение",0);
     else{game.toast("Ошибка автосохранения: "+error,1);std::cerr<<"Autosave failed: "<<error<<'\n';}
 }
-void App::syncActors(bool snap){
+void App::syncActors(bool snap,float dt){
+    if(snap){combatVisuals.clear();floaters.clear();}
     auto& g=world().game;
+    const size_t oldCount=actorYaw.size();
     actorPos.resize(g.actors.size());actorYaw.resize(g.actors.size(),0);
-    for(size_t i=0;i<g.actors.size();++i){actorPos[i]=glm::vec3(g.actors[i].pos.x,0,g.actors[i].pos.y);actorYaw[i]=g.actors[i].facing;}
-    if(!g.actors.empty()){heroPos=actorPos[0];if(snap){lastHeroPos=heroPos;focus=camFocus=heroPos+glm::vec3(0,1,0);}}
+    actorGait.resize(g.actors.size());
+    for(size_t i=0;i<g.actors.size();++i){
+        const auto& actor=g.actors[i];
+        const glm::vec3 nextPos{actor.pos.x,0,actor.pos.y};
+        auto& walk=actorGait[i];
+        if(snap||i>=oldCount){
+            actorYaw[i]=actor.facing;
+            // Loading a zone must not replay the deaths recorded in the campaign.
+            walk={float(i)*1.71f,0.f,actor.alive()?-1.f:enemyRemainsSeconds};
+        }
+        else if(i>0&&!actor.alive()){
+            if(walk.deathSeconds<0.f)walk.deathSeconds=0.f;
+            else if(!animPaused)walk.deathSeconds=std::min(enemyRemainsSeconds,walk.deathSeconds+
+                std::clamp(animTime-walk.impactAt,0.f,dt));
+        }
+        else {
+            walk.deathSeconds=-1.f;
+            const float turn=std::remainder(actor.facing-actorYaw[i],2*pi);
+            actorYaw[i]+=turn*(1.f-std::exp(-(actor.boss?8.f:15.f)*dt));
+            if(!animPaused&&dt>0.f){
+                float speed=glm::length(nextPos-actorPos[i])/dt;
+                float target=std::clamp(speed/1.5f,0.f,1.f);
+                walk.weight+=(target-walk.weight)*(1.f-std::exp(-12.f*dt));
+                walk.phase+=dt*(2.1f+std::min(speed,5.f)*(actor.boss?1.55f:2.85f));
+            }
+        }
+        actorPos[i]=nextPos;
+    }
+    if(g.actors.empty())return;
+    heroPos=actorPos[0];heroYaw=actorYaw[0]+pi;
+    if(snap){
+        pendingBossWindow=Window::None;
+        heroFall={};
+        lastHeroPos=heroPos;focus=camFocus=heroPos+glm::vec3(0,1,0);
+        gait=moveBlend=0;heroAction={};
+    }
 }
 void App::refreshVisuals(bool force){
     auto& c=world();
@@ -225,8 +267,7 @@ void App::castSlot(int slot){
     glm::vec2 point=hoverValid?glm::vec2(hoverPoint.x,hoverPoint.z):g.actors[0].pos;
     auto p=g.castPreview(slot,target,point);
     if(!p.allowed){game.toast(p.reason,1);return;}
-    if(g.cast(slot,target,point)){audio->play(Sfx::Magic,.7f);pulse=1;
-        if(ab.target==combat::Target::Unit&&target>0&&g.actors[0].target<=0)g.attackUnit(target);}
+    g.cast(slot,target,point);
 }
 void App::drinkPotion(){
     int best=-1,heal=0;
@@ -241,9 +282,9 @@ void App::gameInput(float dt){
     bool left=glfwGetMouseButton(window,GLFW_MOUSE_BUTTON_LEFT)==GLFW_PRESS;
     bool rightEdge=right&&!lastRight,leftEdge=left&&!lastLeft&&!held(GLFW_KEY_LEFT_ALT);
     if(win==Window::None&&!freeCamera&&g.phase!=Phase::Defeat){
-        if((rightEdge||leftEdge)&&!ui.overUi){rightClick();rightHold=0;}
+        if((rightEdge||leftEdge)&&!ui.overUi&&!overActionBar()){rightClick();rightHold=0;}
         // holding the right button keeps steering towards the cursor
-        if(right&&!rightEdge&&!ui.overUi&&hoverValid&&hoverActor<0&&hoverEntity<0){rightHold+=dt;
+        if(right&&!rightEdge&&!ui.overUi&&!overActionBar()&&hoverValid&&hoverActor<0&&hoverEntity<0){rightHold+=dt;
             if(rightHold>.15f){rightHold=0;g.moveTo({hoverPoint.x,hoverPoint.z});clickPoint=hoverPoint;clickTimer=.3f;clickAttack=false;}}
         const int slots[]={GLFW_KEY_Q,GLFW_KEY_W,GLFW_KEY_E,GLFW_KEY_R};
         for(int s=0;s<4;++s)if(key(slots[s]))castSlot(s);
@@ -260,32 +301,57 @@ void App::gameInput(float dt){
 }
 void App::followHero(float dt){
     auto& g=game.game;
-    syncActors(false);
-    glm::vec3 v=(heroPos-lastHeroPos)/std::max(dt,1e-4f);lastHeroPos=heroPos;
-    float speed=glm::length(glm::vec2(v.x,v.z));
-    moveBlend=glm::mix(moveBlend,std::clamp(speed/1.6f,0.f,1.f),1.f-std::exp(-10.f*dt));
-    gait+=heroAnimation::gaitAdvance(speed*dt,1.45f,moveBlend);
-    float wanted=g.actors[0].facing+3.14159f;
-    heroYaw+=std::atan2(std::sin(wanted-heroYaw),std::cos(wanted-heroYaw))*(1.f-std::exp(-16.f*dt));
-    if(g.actors[0].swing>.2f)pulse=std::max(pulse,.6f);
-    pulse=std::max(0.f,pulse-dt*2.f);castBlend=glm::mix(castBlend,pulse,1.f-std::exp(-14.f*dt));
+    syncActors(false,dt);
+    const auto& hero=g.actors[0];
+    if(!hero.alive()){
+        if(heroFall.advance(dt))setWindow(Window::Defeat);
+        return;
+    }
+    const float distance=glm::length(heroPos-lastHeroPos);lastHeroPos=heroPos;
+    const float visualDt=animPaused?0.f:dt;
+    // A blink or a dash can cross a whole room in one update.
+    const float travel=distance>hero.speed*dt+.12f?0.f:distance;
+    const float targetBlend=std::clamp(travel/(std::max(dt,.0001f)*3.25f),0.f,1.f);
+    moveBlend=glm::mix(moveBlend,targetBlend,1.f-std::exp(-(targetBlend>moveBlend?14.f:9.f)*visualDt));
+    gait=std::fmod(gait+std::min(17.f*visualDt,heroAnimation::gaitAdvance(travel,1.45f,moveBlend)),2*pi);
+    heroAction.advance(visualDt);
     // reached the object we were walking to
     if(pendingInteract>=0&&pendingInteract<int(game.entities.size())&&!g.actors[0].moving){
         int e=pendingInteract;pendingInteract=-1;
         if(glm::length(g.world2(game.entities[size_t(e)].cell)-g.actors[0].pos)<2.3f)game.interact(e);
     }
 }
-void App::animateActors(float dt){(void)dt;syncActors(false);}
 void App::consumeEvents(){
     auto& g=game.game;
     int hits=0;
     for(const auto& e:g.events){
+        if(!animPaused)combatVisuals.observe(e,g,animTime);
+        if((e.type==combat::Event::Hit||e.type==combat::Event::Death)&&
+           e.target>0&&size_t(e.target)<actorGait.size()){
+            actorGait[size_t(e.target)].impactAt=animTime+(e.directHeroImpact?combat::heroImpactLeadSeconds:0.f);
+        }
         auto pos=[&](int id){return id>=0&&id<int(actorPos.size())?actorPos[size_t(id)]:game.map.center(e.cell);};
         switch(e.type){
-        case combat::Event::Hit:
+        case combat::Event::Cast:
+            if(e.source==0&&g.actors[0].alive()){
+                heroAction.start(g.actors[0].weapon,e.amount,game.heroClass);
+                audio->play(Sfx::Magic,.7f);
+                if(combat::ability(game.heroClass,e.amount).target==combat::Target::Unit&&g.actors[0].target<=0)
+                    g.attackUnit(e.target);
+            }
+            break;
+        case combat::Event::Attack:
+            if(e.source==0&&g.actors[0].alive()&&(heroAction.slot<0||heroAction.phase>=.8f))
+                heroAction.start(g.actors[0].weapon);
+            break;
+        case combat::Event::Hit:{
             if(e.target<0){audio->play(Sfx::Magic);break;}
-            floaters.push_back({std::to_string(e.amount),pos(e.target)+glm::vec3((float(frame%7)-3.f)*.08f,2.2f,0),0,e.target==0?ui::red:(e.source==0?ui::gold:ui::text)});
-            if(hits++<3)audio->play(e.target==0?Sfx::HeroHit:Sfx::Hit,.55f);break;
+            const bool audible=hits++<3;
+            float delay=e.directHeroImpact&&!animPaused?combat::heroImpactLeadSeconds:0.f;
+            floaters.push_back({std::to_string(e.amount),pos(e.target)+glm::vec3((float(frame%7)-3.f)*.08f,2.2f,0),
+                -delay,e.target==0?ui::red:(e.source==0?ui::gold:ui::text),audible&&delay>0});
+            if(audible&&delay==0)audio->play(e.target==0?Sfx::HeroHit:Sfx::Hit,.55f);
+            break;}
         case combat::Event::Heal:floaters.push_back({"+"+std::to_string(e.amount),heroPos+glm::vec3(0,2.2f,0),0,ui::mint});break;
         case combat::Event::Warn:audio->play(Sfx::Warn,.7f);break;
         case combat::Event::Vulnerable:floaters.push_back({"УЯЗВИМ!",pos(e.source)+glm::vec3(0,3.4f,0),0,ui::gold});audio->play(Sfx::Victory,.4f);break;
@@ -312,11 +378,24 @@ void App::handleRequests(){
         case rpg::Request::Smith:setWindow(Window::Smith);break;
         case rpg::Request::Shrine:audio->play(Sfx::Shrine,.7f);setWindow(Window::Shrine);break;
         case rpg::Request::Note:setWindow(Window::Note);break;
-        case rpg::Request::RewardChoice:setWindow(Window::Reward);break;
-        case rpg::Request::Epilogue:setWindow(Window::Epilogue);break;
+        case rpg::Request::RewardChoice:
+        case rpg::Request::Epilogue:
+            if(game.hero().alive()){
+                // Keep the same pause in gameplay while the boss lands in view.
+                pendingBossWindow=type==rpg::Request::Epilogue?Window::Epilogue:Window::Reward;
+                bossWindowAt=realTime+1.26f;pendingInteract=-1;setWindow(Window::None);
+            }
+            break;
         case rpg::Request::Credits:setWindow(Window::Ending);break;
-        case rpg::Request::Defeat:audio->play(Sfx::Defeat);win=Window::Defeat;stack.clear();break;
+        case rpg::Request::Defeat:
+            pendingBossWindow=Window::None;
+            audio->play(Sfx::Defeat);pendingInteract=-1;clickTimer=0;
+            heroFall.start(animTime,game.game,heroYaw);setWindow(Window::None);break;
         }
+    }
+    if(pendingBossWindow!=Window::None&&realTime>=bossWindowAt){
+        setWindow(pendingBossWindow);
+        pendingBossWindow=Window::None;
     }
 }
 void App::setWindow(Window w){win=w;stack.clear();selected=-1;slotConfirm=-1;}
@@ -324,16 +403,23 @@ void App::closeWindow(){if(!stack.empty()){win=stack.back();stack.pop_back();}el
 
 // ------------------------------------------------------------------ dynamic geometry
 static void ring(Mesh& m,glm::vec3 c,float r,float thick,glm::vec3 color,float lift=.06f){
+    if(r<.01f)return;
+    thick=std::min(thick,r);
     int seg=std::max(16,int(r*14));
     for(int i=0;i<seg;++i){float a=float(i)/float(seg)*6.2832f,b=float(i+1)/float(seg)*6.2832f;
         glm::vec3 da(std::cos(a),0,std::sin(a)),db(std::cos(b),0,std::sin(b));
         glm::vec3 y(0,lift,0);
         m.quad(c+y+da*(r-thick),c+y+db*(r-thick),c+y+db*r,c+y+da*r,color,mat::Glow);}
 }
-static void disc(Mesh& m,glm::vec3 c,float r,glm::vec3 color,float lift=.05f){
-    int seg=std::max(16,int(r*14));glm::vec3 y(0,lift,0);
-    for(int i=0;i<seg;++i){float a=float(i)/float(seg)*6.2832f,b=float(i+1)/float(seg)*6.2832f;
-        m.triangle(c+y,c+y+glm::vec3(std::cos(b),0,std::sin(b))*r,c+y+glm::vec3(std::cos(a),0,std::sin(a))*r,color,mat::Glow);}
+static void warningCircle(Mesh& m,glm::vec3 center,float radius,glm::vec3 color){
+    ring(m,center,radius,.065f,color);
+    center.y+=.061f;
+    for(int i=0;i<8;++i){
+        float angle=float(i)*pi*.25f;
+        glm::vec3 dir(std::cos(angle),0,std::sin(angle)),side(-dir.z,0,dir.x);
+        glm::vec3 edge=center+dir*(radius-.065f);
+        m.triangle(edge-side*.075f,edge+side*.075f,edge-dir*.23f,color,mat::Glow);
+    }
 }
 static void rect(Mesh& m,glm::vec2 c,glm::vec2 dir,float length,float width,glm::vec3 color,float lift){
     glm::vec2 d=glm::normalize(dir),s(-d.y,d.x);
@@ -343,8 +429,11 @@ static void rect(Mesh& m,glm::vec2 c,glm::vec2 dir,float length,float width,glm:
 void App::buildDynamic(float time){
     dynamicMesh.vertices.clear();
     auto& c=world();auto& g=c.game;const auto& map=c.map;
-    for(size_t i=1;i<g.actors.size()&&i<actorPos.size();++i){const auto& a=g.actors[i];if(!a.alive())continue;
-        buildEnemy(dynamicMesh,a,actorPos[i],actorYaw[i],time,a.swing>0);}
+    for(size_t i=1;i<g.actors.size()&&i<actorPos.size();++i){
+        const auto& a=g.actors[i];const auto& pose=actorGait[i];
+        if(!a.alive()&&(pose.deathSeconds<0.f||pose.deathSeconds>=enemyRemainsSeconds))continue;
+        buildEnemy(dynamicMesh,a,actorPos[i],actorYaw[i],pose.phase,pose.weight,pose.deathSeconds,animTime-pose.impactAt);
+    }
     for(const auto& e:c.entities){
         if(e.def.type!=rpg::EntityType::Npc||e.hidden)continue;
         glm::vec3 p=map.center(e.cell);glm::vec3 toHero=heroPos-p;float yawNpc=glm::length(toHero)<6.f?std::atan2(toHero.x,toHero.z):0.f;
@@ -352,26 +441,35 @@ void App::buildDynamic(float time){
     }
     for(const auto& b:c.loot)buildLootBag(dynamicMesh,map.center(b.cell),time);
     if(screen!=Screen::Game)return;
-    // projectiles
-    for(const auto& p:g.projectiles){glm::vec3 at(p.pos.x,1.1f,p.pos.y);
-        glm::vec3 col=p.effect==combat::Effect::Burn?glm::vec3(1.f,.45f,.1f):p.effect==combat::Effect::Web?glm::vec3(.9f,.9f,.85f):p.effect==combat::Effect::Poison?glm::vec3(.4f,1.f,.2f):p.hero?glm::vec3(.6f,.8f,1.f):glm::vec3(.9f,.3f,.2f);
-        dynamicMesh.sphere(at,glm::vec3(.16f),col,mat::Glow,8,5);}
-    // hazards and marked attacks: the inner disc grows until the strike lands
-    for(const auto& hz:g.hazards){glm::vec3 cc(hz.center.x,0,hz.center.y);disc(dynamicMesh,cc,hz.radius,{.08f,.30f,.05f},.045f);ring(dynamicMesh,cc,hz.radius,.08f,{.3f,.9f,.2f},.05f);}
-    float blink=.75f+.25f*std::sin(time*12);
+    combatVisuals.draw(dynamicMesh,combatParticles,g,time);
+    // The outer rim marks the actual damage boundary; the moving stroke shows time to impact.
+    for(const auto& hz:g.hazards){
+        glm::vec3 center(hz.center.x,0,hz.center.y);
+        warningCircle(dynamicMesh,center,hz.radius,{.20f,.35f,.08f});
+        ring(dynamicMesh,center,hz.radius*.88f,.035f,{.08f,.20f,.06f});
+    }
     for(const auto& t:g.telegraphs){
         float k=1.f-std::clamp(t.time/t.total,0.f,1.f);
-        glm::vec3 base=t.owner==0?glm::vec3(.9f,.45f,.08f):t.hazard?glm::vec3(.25f,.75f,.15f):glm::vec3(.9f,.12f,.05f);
-        if(t.shape==0){glm::vec3 cc(t.center.x,0,t.center.y);
-            disc(dynamicMesh,cc,t.radius,base*.18f,.045f);disc(dynamicMesh,cc,t.radius*k,base*.55f,.05f);ring(dynamicMesh,cc,t.radius,.07f,base*blink,.06f);}
-        else{rect(dynamicMesh,t.center,t.dir,t.length,t.width,base*.18f,.045f);
-            glm::vec2 d=glm::normalize(t.dir);rect(dynamicMesh,t.center-d*t.length*.5f*(1-k),t.dir,t.length*k,t.width,base*.55f,.05f);}
+        glm::vec3 base=t.owner==0?glm::vec3(.64f,.31f,.09f):t.hazard?glm::vec3(.20f,.43f,.08f):glm::vec3(.61f,.095f,.045f);
+        if(t.shape==0){
+            glm::vec3 center(t.center.x,0,t.center.y);
+            warningCircle(dynamicMesh,center,t.radius,base);
+            ring(dynamicMesh,center,t.radius*k,.045f,base*.65f,.055f);
+        }else{
+            glm::vec2 d=glm::normalize(t.dir),side(-d.y,d.x);
+            for(float sign:{-1.f,1.f}){
+                rect(dynamicMesh,t.center+side*sign*(t.width-.07f)*.5f,d,t.length,.07f,base,.06f);
+                rect(dynamicMesh,t.center+d*sign*(t.length-.07f)*.5f,d,.07f,t.width,base,.06f);
+            }
+            rect(dynamicMesh,t.center+d*(k-.5f)*(t.length-.10f),d,.10f,t.width,base*.65f,.055f);
+        }
     }
     // selection rings
     const auto& h=g.actors[0];
-    ring(dynamicMesh,heroPos,.62f,.05f,{.15f,.8f,.55f});
+    if(h.alive())ring(dynamicMesh,heroPos,.62f,.05f,{.15f,.8f,.55f});
     if(h.target>0&&h.target<int(g.actors.size())&&g.actors[size_t(h.target)].alive())ring(dynamicMesh,actorPos[size_t(h.target)],g.actors[size_t(h.target)].radius+.35f,.07f,{1.f,.25f,.1f});
-    if(hoverActor>0)ring(dynamicMesh,actorPos[size_t(hoverActor)],g.actors[size_t(hoverActor)].radius+.3f,.04f,{.9f,.5f,.2f});
+    if(hoverActor>0&&hoverActor<int(g.actors.size())&&g.actors[size_t(hoverActor)].alive())
+        ring(dynamicMesh,actorPos[size_t(hoverActor)],g.actors[size_t(hoverActor)].radius+.3f,.04f,{.9f,.5f,.2f});
     if(hoverEntity>=0)ring(dynamicMesh,map.center(c.entities[size_t(hoverEntity)].cell),.75f,.05f,{.9f,.75f,.25f});
     // ability range when the cursor rests on an ability button
     if(hoverAbility>=0){const auto& ab=combat::ability(game.heroClass,hoverAbility);float r=ab.target==combat::Target::Self?ab.radius:ab.range;
@@ -411,13 +509,14 @@ void App::frameStep(float dt){
     if(key(GLFW_KEY_F4)){freeCamera=!freeCamera;if(freeCamera){freePos=cameraPos;glm::vec3 f=glm::normalize(camFocus-cameraPos);freeYaw=std::atan2(f.x,f.z);freePitch=std::asin(f.y);}}
     bool shot=key(GLFW_KEY_F12);
     if(screen==Screen::Game){
-        if(key(GLFW_KEY_ESCAPE)){
+        const bool transition=heroFall.pending()||pendingBossWindow!=Window::None;
+        if(key(GLFW_KEY_ESCAPE)&&!transition){
             if(freeCamera)freeCamera=false;
             else if(win==Window::None)setWindow(Window::Pause);
             else if(win!=Window::Defeat&&win!=Window::Epilogue&&win!=Window::Reward)closeWindow();
         }
-        if(key(GLFW_KEY_F1)){if(win==Window::Help)closeWindow();else{stack.push_back(win);win=Window::Help;}}
-        if(win==Window::None||win==Window::Inventory||win==Window::Character||win==Window::Journal||win==Window::Map){
+        if(key(GLFW_KEY_F1)&&!transition){if(win==Window::Help)closeWindow();else{stack.push_back(win);win=Window::Help;}}
+        if(!transition&&(win==Window::None||win==Window::Inventory||win==Window::Character||win==Window::Journal||win==Window::Map)){
             auto toggle=[&](int k,Window target){if(key(k))win=win==target?Window::None:target;};
             toggle(GLFW_KEY_I,Window::Inventory);toggle(GLFW_KEY_C,Window::Character);toggle(GLFW_KEY_J,Window::Journal);toggle(GLFW_KEY_M,Window::Map);
         }
@@ -431,8 +530,8 @@ void App::frameStep(float dt){
         focus=heroPos+glm::vec3(0,1.f,0);
         pick();
         bool live=win==Window::None||win==Window::Inventory||win==Window::Character||win==Window::Journal||win==Window::Map;
-        if(win==Window::None)gameInput(dt);else lastRight=right;
-        if(live)game.game.update(dt);
+        if(win==Window::None&&pendingBossWindow==Window::None)gameInput(dt);else lastRight=right;
+        if(live&&pendingBossWindow==Window::None)game.game.update(dt);
         followHero(dt);
         consumeEvents();
         game.update(dt);
@@ -446,23 +545,29 @@ void App::frameStep(float dt){
         lastRight=right;
         yaw+=dt*.04f;focus=c.map.center({17,11})+glm::vec3(0,1.5f,0);zoom=std::min(zoom,13.f);
         c.game.update(dt);
-        syncActors(false);
+        syncActors(false,dt);
     }
-    for(auto& f:floaters)f.time+=dt;
+    for(auto& f:floaters){
+        f.time+=dt;
+        if(f.impactSound&&f.time>=0){audio->play(Sfx::Hit,.55f);f.impactSound=false;}
+    }
     floaters.erase(std::remove_if(floaters.begin(),floaters.end(),[](const Floater& f){return f.time>1.2f;}),floaters.end());
     fade=glm::mix(fade,fadeTarget,1.f-std::exp(-5.f*dt));
     updateCamera(dt);
     refreshVisuals(false);
     applyMusic();
     // geometry
+    combatParticles.clear();
     buildDynamic(animTime);dynamicGpu->update(dynamicMesh);
     heroMesh.vertices.clear();
     glm::mat4 heroModel(1);
     if(screen==Screen::Game){
-        buildAnimatedHero(heroMesh,animTime,gait,moveBlend,castBlend);
-        glm::vec3 tint=game.heroClass==combat::Class::Warrior?glm::vec3(1.f):game.heroClass==combat::Class::Rogue?glm::vec3(.35f,1.9f,.9f):glm::vec3(.6f,.8f,3.2f);
-        for(auto& v:heroMesh.vertices)if(int(v.material+.5f)==5||int(v.material+.5f)==11)v.color*=tint;
+        float poseTime=heroFall.active()?heroFall.startTime+std::min(heroFall.age,heroAnimation::Fall::settled):animTime;
+        float strideWeight=heroFall.active()?moveBlend*heroFall.retainStride():moveBlend;
+        const auto pose=heroFall.active()?heroFall.pose(heroAction.current,game.hero().weapon):heroAction.current;
+        buildAnimatedHero(heroMesh,poseTime,gait,strideWeight,pose,game.heroClass,game.hero().weapon);
         heroModel=glm::scale(glm::rotate(glm::translate(glm::mat4(1),heroPos),heroYaw,glm::vec3(0,1,0)),glm::vec3(1.45f));
+        if(heroFall.active())heroModel*=heroFall.groundTransform(heroMesh);
     }
     heroGpu->update(heroMesh);
     FrameInput f;f.view=view;f.projection=projection;f.cameraPos=cameraPos;f.focus=camFocus;f.heroPos=heroPos;f.time=animTime;
@@ -475,14 +580,17 @@ void App::frameStep(float dt){
     if(screen!=Screen::Game)f.heroPos=focus;
     rs.pauseAnimation=animPaused;rs.technique=settings.technique;rs.perspective=settings.perspective||freeCamera;rs.shadowQuality=settings.shadowQuality;rs.effects=settings.effects;
     rs.tiltShift=settings.tiltShift;
-    std::vector<Particle> extra;
-    if(pulse>.5f&&game.heroClass==combat::Class::Mage)for(int i=0;i<24;++i){float a=float(i)*6.2832f/24.f;extra.push_back({heroPos+glm::vec3(std::cos(a)*.6f,1.2f,std::sin(a)*.6f),{1.6f,.7f,.2f},.08f,pulse,1});}
-    renderer->render(f,rs,*dynamicGpu,*heroGpu,heroModel,extra);
+    renderer->render(f,rs,*dynamicGpu,*heroGpu,heroModel,combatParticles);
     // interface
     hoverAbility=-1;
     if(screen==Screen::Menu)drawMenu();
     else if(screen==Screen::ClassSelect)drawClassSelect();
-    else{if(hudVisible)drawHud();drawWindows();}
+    else{
+        if(hudVisible&&win==Window::None&&!heroFall.active()&&pendingBossWindow==Window::None)drawHud();
+        drawWindows();
+        if(win==Window::Inventory||win==Window::Character||win==Window::Journal||win==Window::Map)
+            drawWindowShortcuts(ui.width*.5f-302,ui.height-52,false);
+    }
     if(screen!=Screen::Game&&win!=Window::None)drawWindows();
     drawTechniqueBadge();
     ui.drawTooltip();
@@ -507,8 +615,11 @@ int App::run(){
             auto require=[](bool ok,const char* what){if(!ok)throw std::runtime_error(std::string("Smoke scenario failed: ")+what);std::cout<<"  ok: "<<what<<'\n';};
             auto clickEntity=[&](const char* id){for(size_t i=0;i<game.entities.size();++i)if(std::string(game.entities[i].def.id)==id){hoverEntity=int(i);hoverActor=-1;rightClick();return;}};
             auto clickAt=[&](Cell c){hoverEntity=-1;hoverActor=-1;hoverPoint=game.map.center(c);hoverValid=true;rightClick();};
+            require(game.zoneId=="road"&&game.zone().surface,"new hero starts on the Old Road");
+            for(const auto& e:game.entities)if(std::string(e.def.id)=="to_village"){clickAt(e.cell);break;}
+            require(frames(180,[&]{return game.zoneId=="village";}),"entered the village from the forest");
             clickEntity("elder");
-            require(frames(400,[&]{return win==Window::Dialog;}),"walked to the elder and opened the dialog");
+            require(frames(900,[&]{return win==Window::Dialog;}),"walked to the elder and opened the dialog");
             win=Window::None;
             clickEntity("shrine_village");
             require(frames(400,[&]{return win==Window::Shrine;})&&game.shrineActive("shrine_village"),"shrine activated by click");
@@ -527,7 +638,11 @@ int App::run(){
                     if(g.actors[0].hp<g.actors[0].maxHp/3)drinkPotion();
                     return !g.inBattle();});
             require(!game.game.inBattle(),"battle resolved in real time");
-            if(win==Window::Defeat){game.respawnAtShrine();win=Window::None;handleRequests();}
+            if(game.hero().alive())game.game.damage(0,game.hero().hp);
+            require(frames(3,[&]{return heroFall.pending()&&win==Window::None;}),"fall began before defeat screen");
+            require(frames(65,[&]{return win==Window::Defeat;}),"defeat screen followed the settled pose");
+            game.respawnAtShrine();win=Window::None;handleRequests();
+            require(game.hero().alive()&&!heroFall.active(),"revived at the shrine with the standing pose");
             std::cout<<"Scripted session finished in zone "<<game.zoneId<<", hero HP "<<game.hero().hp<<'\n';
         }
         for(const auto& cs:cases){
@@ -560,7 +675,15 @@ int App::run(){
         animTime=options.time;
         if(options.view=="close"){zoom=camZoom=6.5f;}
         if(options.view=="wide"){zoom=camZoom=15.f;}
-        for(int i=0;i<40;++i){glfwPollEvents();frameStep(i<38?1.f/30:0.f);glfwSwapBuffers(window);}
+        if(options.window=="defeat"){
+            // Sample the real lethal-hit sequence at the requested time for motion review.
+            fade=1;frameStep(0);
+            float remaining=std::clamp(options.time,0.f,heroAnimation::Fall::reveal+.1f);
+            while(remaining>0.f){
+                float dt=std::min(1.f/30,remaining);
+                glfwPollEvents();frameStep(dt);glfwSwapBuffers(window);remaining-=dt;
+            }
+        }else for(int i=0;i<40;++i){glfwPollEvents();frameStep(i<38?1.f/30:0.f);glfwSwapBuffers(window);}
         int w,h;glfwGetFramebufferSize(window,&w,&h);frameStep(0);capture(options.capture,w,h);glfwSwapBuffers(window);
         return 0;
     }
